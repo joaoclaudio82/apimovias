@@ -1,0 +1,12 @@
+services:
+  postgres:
+    image: postgres:latest
+    container_name: movias_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: movias
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./data/sql/mock.sql:/docker-entrypoint-initdb.d/mock.sql:ro
