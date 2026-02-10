@@ -55,24 +55,26 @@ class RelatorioService:
         path: Path = settings.CSV_PATH
     ) -> None:
         cls.__validate_existing_csv_schema(path)
-        existing_keys: Set[Tuple[int, str]] = cls._existing_keys()
+        existing_keys: Set[Tuple[str, str]] = cls._existing_keys()
         for veiculos in RelatorioRepository.get_veiculos_stream(id_start, id_end, data_ini, data_fim):
             df: pd.DataFrame = pd.DataFrame.from_records(veiculos)
             df = cls.__normalize_dataframe(df)
-            df['__key'] = list(zip(df['veiculo_id'], df['data']))
+            df = df.drop_duplicates(subset=['veiculo_id', 'data'])
+            df['__key'] = list(zip(df['veiculo_id'].astype(str), df['data'].astype(str)))
             df = df[~df['__key'].isin(existing_keys)].drop(columns='__key')
             if df.empty:
                 continue
 
-            existing_keys.update(zip(df['veiculo_id'], df['data']))
+            existing_keys.update(zip(df['veiculo_id'].astype(str), df['data'].astype(str)))
             df.to_csv(path, mode='a', index=False, header=PathUtils.is_empty(path))
 
     @staticmethod
-    def _existing_keys(path: Path = settings.CSV_PATH) -> Set[Tuple[int, str]]:
+    def _existing_keys(path: Path = settings.CSV_PATH) -> Set[Tuple[str, str]]:
         if PathUtils.is_empty(path):
             return set()
 
         df = pd.read_csv(path, usecols=['veiculo_id', 'data'])
+        df['veiculo_id'] = df['veiculo_id'].astype(str)
         df['data'] = df['data'].astype(str)
         return set(zip(df['veiculo_id'], df['data']))
 
