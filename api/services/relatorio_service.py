@@ -2,11 +2,12 @@ import numpy as np
 import pandas as pd
 from datetime import date
 from pathlib import Path
-from typing import Optional, Set, Tuple, List, Callable
+from typing import Optional, Set, Tuple, List, Callable, Dict
 from starlette.responses import FileResponse
 from api.repositories.relatorio_repository import RelatorioRepository
 from api.settings import settings
 from api.utils.path_utils import PathUtils
+from api.utils.csv_utils import CsvUtils
 
 class RelatorioService:
     __FEATURE_WINDOWS: List[int] = [7, 14, 21, 28]
@@ -56,8 +57,33 @@ class RelatorioService:
     ) -> None:
         cls.__validate_existing_csv_schema(path)
         existing_keys: Set[Tuple[str, str]] = cls._existing_keys()
-        for veiculos in RelatorioRepository.get_veiculos_stream(id_start, id_end, data_ini, data_fim):
+        latest_by_vehicle = cls._latest_dates_by_vehicle(path)
+        vei_ids: List[int] = []
+        data_ini_list: List[Optional[date]] = []
+        data_fim_list: List[Optional[date]] = []
+        for veiculo_id in range(id_start, id_end + 1):
+            latest = latest_by_vehicle.get(veiculo_id)
+            if data_fim is not None and latest is not None and latest >= data_fim:
+                continue
+
+            data_ini_eff = data_ini
+            if latest is not None:
+                next_day = latest + pd.Timedelta(days=1)
+                next_day_date = next_day.date()
+                if data_ini_eff is None or next_day_date > data_ini_eff:
+                    data_ini_eff = next_day_date
+
+            vei_ids.append(veiculo_id)
+            data_ini_list.append(data_ini_eff)
+            data_fim_list.append(data_fim)
+
+        if not vei_ids:
+            return
+
+        for veiculos in RelatorioRepository.get_veiculos_stream(vei_ids, data_ini_list, data_fim_list):
             df: pd.DataFrame = pd.DataFrame.from_records(veiculos)
+            if df.empty:
+                continue
             df = cls.__normalize_dataframe(df)
             df = df.drop_duplicates(subset=['veiculo_id', 'data'])
             df['__key'] = list(zip(df['veiculo_id'].astype(str), df['data'].astype(str)))
@@ -66,7 +92,7 @@ class RelatorioService:
                 continue
 
             existing_keys.update(zip(df['veiculo_id'].astype(str), df['data'].astype(str)))
-            df.to_csv(path, mode='a', index=False, header=PathUtils.is_empty(path))
+            CsvUtils.atomic_append_dataframe(df, path)
 
     @staticmethod
     def _existing_keys(path: Path = settings.CSV_PATH) -> Set[Tuple[str, str]]:
@@ -77,6 +103,19 @@ class RelatorioService:
         df['veiculo_id'] = df['veiculo_id'].astype(str)
         df['data'] = df['data'].astype(str)
         return set(zip(df['veiculo_id'], df['data']))
+
+    @staticmethod
+    def _latest_dates_by_vehicle(path: Path = settings.CSV_PATH) -> Dict[int, date]:
+        if PathUtils.is_empty(path):
+            return {}
+
+        df = pd.read_csv(path, usecols=['veiculo_id', 'data'])
+        df['data'] = pd.to_datetime(df['data'], errors='coerce')
+        df = df.dropna(subset=['data'])
+        if df.empty:
+            return {}
+        latest = df.groupby('veiculo_id')['data'].max()
+        return {int(vid): dt.date() for vid, dt in latest.items()}
 
     @classmethod
     def __validate_existing_csv_schema(cls, path: Path = settings.CSV_PATH) -> None:
@@ -105,7 +144,15 @@ class RelatorioService:
     def __apply_per_vehicle(df: pd.DataFrame, fn: Callable[[pd.DataFrame], pd.DataFrame]) -> pd.DataFrame:
         if 'veiculo_id' not in df.columns:
             return fn(df)
-        return df.groupby('veiculo_id', group_keys=False).apply(fn)
+        parts: List[pd.DataFrame] = []
+        for veiculo_id, g in df.groupby('veiculo_id', sort=False):
+            if 'veiculo_id' not in g.columns:
+                g = g.copy()
+                g['veiculo_id'] = veiculo_id
+            parts.append(fn(g))
+        if not parts:
+            return df.iloc[0:0].copy()
+        return pd.concat(parts, ignore_index=True)
 
     @staticmethod
     def __parse_date_with_fallback(df: pd.DataFrame) -> pd.Series:
@@ -134,7 +181,8 @@ class RelatorioService:
             'flag_reset_odometro',
         ]
 
-        if [col for col in required if col not in df.columns]:
+        missing = [col for col in required if col not in df.columns]
+        if missing:
             raise ValueError(f'Colunas obrigatorias ausentes: {missing}')
 
     @staticmethod

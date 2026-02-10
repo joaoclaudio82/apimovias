@@ -6,9 +6,12 @@ from api.database import engine
 SQL = r'''
 WITH params AS (
   SELECT
-    CAST(:vei_id AS bigint) AS vei_id,
-    CAST(:data_ini AS date) AS data_ini,
-    CAST(:data_fim AS date) AS data_fim
+    *
+  FROM unnest(
+    CAST(:vei_ids AS bigint[]),
+    CAST(:data_ini_list AS date[]),
+    CAST(:data_fim_list AS date[])
+  ) AS p(vei_id, data_ini, data_fim)
 ),
 trips_day AS (
   SELECT
@@ -137,16 +140,16 @@ SELECT
 FROM calc c
 JOIN public.veiculo v
   ON v.id = c.vei_id
-ORDER BY c.data;
+ORDER BY c.vei_id, c.data;
 '''
 
 class RelatorioRepository:
     @staticmethod
     def get_veiculos(veiculo_id: int, data_ini: Optional[date], data_fim: Optional[date]) -> List[Dict[str, Any]]:
         params: Dict[str, Any] = {
-          "vei_id": int(veiculo_id),
-          "data_ini": data_ini,
-          "data_fim": data_fim
+          "vei_ids": [int(veiculo_id)],
+          "data_ini_list": [data_ini],
+          "data_fim_list": [data_fim]
         }
 
         with engine.connect() as connection:
@@ -154,8 +157,31 @@ class RelatorioRepository:
             return [dict(row) for row in result.mappings().all()]
 
     @staticmethod
-    def get_veiculos_stream(id_start: int, id_end: int, data_ini: Optional[date], data_fim: Optional[date]) -> Iterable[List[Dict[str, Any]]]:
-        for veiculo_id in range(id_start, id_end + 1):
-            veiculos: List[Dict[str, Any]] = RelatorioRepository.get_veiculos(veiculo_id, data_ini, data_fim)
+    def get_veiculos_stream(vei_ids: List[int], data_ini_list: List[Optional[date]], data_fim_list: List[Optional[date]]) -> Iterable[List[Dict[str, Any]]]:
+        if not vei_ids:
+            return
+
+        if not (len(vei_ids) == len(data_ini_list) == len(data_fim_list)):
+            raise ValueError("Listas de parâmetros com tamanhos diferentes.")
+
+        params: Dict[str, Any] = {
+          "vei_ids": vei_ids,
+          "data_ini_list": data_ini_list,
+          "data_fim_list": data_fim_list
+        }
+
+        with engine.connect() as connection:
+            result = connection.execute(text(SQL), params)
+            rows = [dict(row) for row in result.mappings().all()]
+
+        if not rows:
+            return
+
+        by_vehicle: Dict[int, List[Dict[str, Any]]] = {}
+        for row in rows:
+            by_vehicle.setdefault(int(row["veiculo_id"]), []).append(row)
+
+        for veiculo_id in vei_ids:
+            veiculos = by_vehicle.get(veiculo_id)
             if veiculos:
                 yield veiculos
