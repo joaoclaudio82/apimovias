@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional, Set, Tuple, List, Callable, Dict
 from starlette.responses import FileResponse
@@ -68,10 +68,9 @@ class RelatorioService:
 
             data_ini_eff = data_ini
             if latest is not None:
-                next_day = latest + pd.Timedelta(days=1)
-                next_day_date = next_day.date()
-                if data_ini_eff is None or next_day_date > data_ini_eff:
-                    data_ini_eff = next_day_date
+                next_day = latest + timedelta(days=1)
+                if data_ini_eff is None or next_day > data_ini_eff:
+                    data_ini_eff = next_day
 
             vei_ids.append(veiculo_id)
             data_ini_list.append(data_ini_eff)
@@ -84,6 +83,7 @@ class RelatorioService:
             df: pd.DataFrame = pd.DataFrame.from_records(veiculos)
             if df.empty:
                 continue
+
             df = cls.__normalize_dataframe(df)
             df = df.drop_duplicates(subset=['veiculo_id', 'data'])
             df['__key'] = list(zip(df['veiculo_id'].astype(str), df['data'].astype(str)))
@@ -114,6 +114,7 @@ class RelatorioService:
         df = df.dropna(subset=['data'])
         if df.empty:
             return {}
+
         latest = df.groupby('veiculo_id')['data'].max()
         return {int(vid): dt.date() for vid, dt in latest.items()}
 
@@ -131,12 +132,14 @@ class RelatorioService:
         df = df.copy()
         RelatorioService.__validate_schema(df)
         df['data'] = RelatorioService.__parse_date_with_fallback(df)
-        df['fimdesemana'] = df['data'].dt.weekday.isin([5, 6]).astype('Int64')
+        dt_idx = pd.DatetimeIndex(df['data'])
+        dow = pd.Series(dt_idx.weekday.tolist(), index=df.index)
+        df['fimdesemana'] = dow.isin([5, 6]).astype('Int64')
         df = df.sort_values(by=['veiculo_id', 'data']).reset_index(drop=True)
         df = RelatorioService.__apply_per_vehicle(df, RelatorioService.__sane_odometer_and_select)
         df = RelatorioService.__apply_per_vehicle(df, RelatorioService.__apply_outliers)
         df = RelatorioService.__apply_per_vehicle(df, RelatorioService.__apply_features)
-        df['data'] = df['data'].dt.date.astype(str)
+        df['data'] = pd.Series(pd.DatetimeIndex(df['data']).strftime('%Y-%m-%d').tolist(), index=df.index)
         df = df[RelatorioService.__OUTPUT_COLUMNS]
         return df
 
@@ -144,19 +147,27 @@ class RelatorioService:
     def __apply_per_vehicle(df: pd.DataFrame, fn: Callable[[pd.DataFrame], pd.DataFrame]) -> pd.DataFrame:
         if 'veiculo_id' not in df.columns:
             return fn(df)
-        parts: List[pd.DataFrame] = []
-        for veiculo_id, g in df.groupby('veiculo_id', sort=False):
+
+        df_idx = df.set_index('veiculo_id', drop=True)
+        def _apply(g: pd.DataFrame) -> pd.DataFrame:
             if 'veiculo_id' not in g.columns:
                 g = g.copy()
-                g['veiculo_id'] = veiculo_id
-            parts.append(fn(g))
-        if not parts:
-            return df.iloc[0:0].copy()
-        return pd.concat(parts, ignore_index=True)
+                g['veiculo_id'] = g.index
+            return fn(g)
+
+        res_any = df_idx.groupby(level=0, sort=False, group_keys=False).apply(_apply)
+        if isinstance(res_any, pd.DataFrame):
+            res: pd.DataFrame = res_any
+        else:
+            res = res_any.to_frame()
+        if 'veiculo_id' not in res.columns:
+            res = res.copy()
+            res['veiculo_id'] = res.index
+        return res.reset_index(drop=True)
 
     @staticmethod
     def __parse_date_with_fallback(df: pd.DataFrame) -> pd.Series:
-        dt = pd.to_datetime(df.get('data'), errors='coerce')
+        dt = pd.to_datetime(df['data'], errors='coerce')
         if dt.notna().any():
             return dt
         if 'data_original_str' in df.columns:
@@ -166,6 +177,10 @@ class RelatorioService:
         if 'data_br' in df.columns:
             return pd.to_datetime(df['data_br'], dayfirst=True, errors='coerce')
         return dt
+
+    @staticmethod
+    def __num_series(df: pd.DataFrame, col: str) -> pd.Series:
+        return pd.Series(pd.to_numeric(df[col], errors='coerce'), index=df.index)
 
     @staticmethod
     def __validate_schema(df: pd.DataFrame) -> None:
@@ -188,37 +203,33 @@ class RelatorioService:
     @staticmethod
     def __sane_odometer_and_select(df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values('data').copy()
-        odo_fim = pd.to_numeric(df.get('odo_fim_dia'), errors='coerce')
-        odo_ini = pd.to_numeric(df.get('odo_ini_dia'), errors='coerce')
-        delta_raw = odo_fim - odo_ini
-        delta_odo = delta_raw.copy()
+        odo_fim: pd.Series = RelatorioService.__num_series(df, 'odo_fim_dia')
+        odo_ini: pd.Series = RelatorioService.__num_series(df, 'odo_ini_dia')
+        delta_raw: pd.Series = odo_fim - odo_ini
+        delta_odo: pd.Series = delta_raw.copy()
 
         if 'flag_reset_odometro' in df.columns:
-            reset_mask = pd.to_numeric(df['flag_reset_odometro'], errors='coerce').fillna(0).astype('Int64') == 1
+            reset_mask: pd.Series = RelatorioService.__num_series(df, 'flag_reset_odometro').fillna(0).astype('Int64') == 1
             delta_odo = delta_odo.mask(reset_mask)
         delta_odo = delta_odo.mask(delta_odo < 0)
 
         if 'km_dia_por_odometro' in df.columns:
-            odo_pref = pd.to_numeric(df['km_dia_por_odometro'], errors='coerce')
+            odo_pref: pd.Series = RelatorioService.__num_series(df, 'km_dia_por_odometro')
             odo_pref = odo_pref.where(odo_pref.notna(), delta_odo)
         else:
             odo_pref = delta_odo
 
-        soma = pd.to_numeric(df.get('km_dia_por_soma'), errors='coerce')
-        km_sel = odo_pref.where(odo_pref.notna(), soma).fillna(0.0).clip(lower=0)
+        soma: pd.Series = RelatorioService.__num_series(df, 'km_dia_por_soma')
+        km_sel: pd.Series = odo_pref.where(odo_pref.notna(), soma).fillna(0.0).clip(0, None)
         df['km_dia_final'] = km_sel.astype('float64')
 
-        df['km_fonte'] = pd.Series(
-            np.where(odo_pref.notna(), 'odometro', np.where(soma.notna(), 'soma', 'zero')),
-            index=df.index,
-            dtype='string'
-        )
+        km_fonte = pd.Series('zero', index=df.index, dtype='string')
+        km_fonte = km_fonte.where(~soma.notna(), 'soma')
+        km_fonte = km_fonte.where(~odo_pref.notna(), 'odometro')
+        df['km_fonte'] = km_fonte
 
-        if 'atividade_total_h' in df.columns:
-            h = pd.to_numeric(df['atividade_total_h'], errors='coerce').fillna(0.0).clip(lower=0)
-            df['h_dia_final'] = h.astype('float64')
-        else:
-            df['h_dia_final'] = 0.0
+        h: pd.Series = RelatorioService.__num_series(df, 'atividade_total_h').fillna(0.0).clip(0, None)
+        df['h_dia_final'] = h.astype('float64')
 
         df['delta_odo'] = delta_odo
         df['delta_odo_negativo_flag'] = delta_raw < 0
@@ -227,42 +238,42 @@ class RelatorioService:
 
     @staticmethod
     def __cap_iqr(series: pd.Series) -> pd.Series:
-        s = pd.to_numeric(series, errors='coerce')
+        s: pd.Series = pd.Series(pd.to_numeric(series, errors='coerce'), index=series.index)
         q1 = s.quantile(0.25)
         q3 = s.quantile(0.75)
         if pd.isna(q1) or pd.isna(q3):
-            return s.clip(lower=0)
+            return s.clip(0, None)
         iqr = q3 - q1
         if iqr == 0:
-            return s.clip(lower=0)
+            return s.clip(0, None)
         lo = q1 - 1.5 * iqr
         hi = q3 + 1.5 * iqr
-        return s.clip(lower=max(0.0, lo), upper=hi)
+        return s.clip(max(0.0, lo), hi)
 
     @staticmethod
     def __apply_outliers(df: pd.DataFrame) -> pd.DataFrame:
-        km_before = pd.to_numeric(df.get('km_dia_final'), errors='coerce').fillna(0.0)
-        h_before = pd.to_numeric(df.get('h_dia_final'), errors='coerce').fillna(0.0)
+        km_before: pd.Series = RelatorioService.__num_series(df, 'km_dia_final').fillna(0.0)
+        h_before: pd.Series = RelatorioService.__num_series(df, 'h_dia_final').fillna(0.0)
 
-        km_cap = km_before.clip(upper=2400.0)
-        h_cap = h_before.clip(upper=24.0)
+        km_cap: pd.Series = km_before.clip(None, 2400.0)
+        h_cap: pd.Series = h_before.clip(None, 24.0)
 
-        km_iqr = RelatorioService.__cap_iqr(km_cap)
-        h_iqr = RelatorioService.__cap_iqr(h_cap)
+        km_iqr: pd.Series = RelatorioService.__cap_iqr(km_cap)
+        h_iqr: pd.Series = RelatorioService.__cap_iqr(h_cap)
 
         if len(df) >= 90:
             mu_km = float(km_iqr.mean())
             sd_km = float(km_iqr.std(ddof=0)) or 1.0
             z_km = (km_iqr - mu_km) / sd_km
-            km_final = km_iqr.mask(z_km.abs() > 4, mu_km + 4 * np.sign(z_km) * sd_km).clip(lower=0)
+            km_final = km_iqr.mask(z_km.abs() > 4, mu_km + 4 * np.sign(z_km) * sd_km).clip(0, None)
 
             mu_h = float(h_iqr.mean())
             sd_h = float(h_iqr.std(ddof=0)) or 1.0
             z_h = (h_iqr - mu_h) / sd_h
-            h_final = h_iqr.mask(z_h.abs() > 4, mu_h + 4 * np.sign(z_h) * sd_h).clip(lower=0)
+            h_final = h_iqr.mask(z_h.abs() > 4, mu_h + 4 * np.sign(z_h) * sd_h).clip(0, None)
         else:
-            km_final = km_iqr.clip(lower=0)
-            h_final = h_iqr.clip(lower=0)
+            km_final = km_iqr.clip(0, None)
+            h_final = h_iqr.clip(0, None)
 
         df['km_dia_clean'] = km_final.astype('float32')
         df['h_dia_clean'] = h_final.astype('float32')
@@ -273,49 +284,61 @@ class RelatorioService:
         df = df.copy()
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df['data'] = RelatorioService.__parse_date_with_fallback(df)
-        df = df[df['data'].notna()].sort_values('data')
+        df = df[df['data'].notna()].sort_values('data').copy()
         if df.empty:
             return df
 
-        km = pd.to_numeric(df.get('km_dia_clean'), errors='coerce').fillna(0).astype('float32')
-        hh = pd.to_numeric(df.get('h_dia_clean'), errors='coerce').fillna(0).astype('float32')
+        km: pd.Series = RelatorioService.__num_series(df, 'km_dia_clean').fillna(0).astype('float32')
+        hh: pd.Series = RelatorioService.__num_series(df, 'h_dia_clean').fillna(0).astype('float32')
 
-        for w in RelatorioService.__FEATURE_WINDOWS:
-            df[f'mm_km_{w}'] = km.rolling(window=w, min_periods=1).mean().astype('float32')
-            df[f'sm_km_{w}'] = km.rolling(window=w, min_periods=1).sum().astype('float32')
-            df[f'mm_h_{w}'] = hh.rolling(window=w, min_periods=1).mean().astype('float32')
-
-        df.drop(columns=['fimdesemana'], errors='ignore', inplace=True)
-
-        wd = df['data'].dt.weekday
-        wd = wd.where(df['data'].notna(), -1).fillna(-1).astype('int16')
-        df['weekday'] = wd
-        df['fimdesemana'] = (wd >= 5).astype('int8')
-
-        mes = df['data'].dt.month
-        mes = mes.where(df['data'].notna(), 0).fillna(0).astype('int8')
-        df['mes'] = mes
-
-        wd_pos = np.where(wd.values >= 0, wd.values, 0).astype('float32')
-        ang = (2 * np.pi * (wd_pos / np.float32(7.0))).astype('float32')
-        df['sin_sem'] = np.sin(ang).astype('float32')
-        df['cos_sem'] = np.cos(ang).astype('float32')
-
-        flag_parado = (km == 0).astype('int8')
-        df['flag_parado'] = flag_parado
-
-        start_seq = ((flag_parado == 1) & (flag_parado.shift(1).fillna(0).astype('int8') == 0)).astype('int8')
-        bloco_id = start_seq.cumsum()
-        seq = df.groupby(bloco_id, sort=False)['flag_parado'].cumcount() + 1
-        df['dias_parado_seq'] = np.where(flag_parado == 1, seq, 0).astype('int16')
-
-        df['pct_parado_7d'] = flag_parado.rolling(window=7, min_periods=1).mean().astype('float32')
-        df['pct_parado_14d'] = flag_parado.rolling(window=14, min_periods=1).mean().astype('float32')
+        df = RelatorioService.__add_rolling_features(df, km, hh)
+        df = RelatorioService.__add_calendar_features(df)
+        df = RelatorioService.__add_parado_features(df, km)
 
         if 'data_br' not in df.columns:
-            df['data_br'] = df['data'].dt.strftime('%d/%m/%Y')
+            df['data_br'] = pd.Series(pd.DatetimeIndex(df['data']).strftime('%d/%m/%Y').tolist(), index=df.index)
 
         df['km_dia_clean'] = km
         df['h_dia_clean'] = hh
         df['veiculo_id'] = df['veiculo_id'].astype('string')
+        return df
+
+    @staticmethod
+    def __add_rolling_features(df: pd.DataFrame, km: pd.Series, hh: pd.Series) -> pd.DataFrame:
+        for w in RelatorioService.__FEATURE_WINDOWS:
+            df[f'mm_km_{w}'] = km.rolling(window=w, min_periods=1).mean().astype('float32')
+            df[f'sm_km_{w}'] = km.rolling(window=w, min_periods=1).sum().astype('float32')
+            df[f'mm_h_{w}'] = hh.rolling(window=w, min_periods=1).mean().astype('float32')
+        return df
+
+    @staticmethod
+    def __add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
+        df.drop(columns=['fimdesemana'], errors='ignore', inplace=True)
+
+        dt_idx = pd.DatetimeIndex(df['data'])
+        wd: pd.Series = pd.Series(dt_idx.weekday.tolist(), index=df.index).astype('int16')
+        df['weekday'] = wd
+        df['fimdesemana'] = (wd >= 5).astype('int8')
+
+        mes: pd.Series = pd.Series(dt_idx.month.tolist(), index=df.index).astype('int8')
+        df['mes'] = mes
+
+        ang = (2 * np.pi * (wd.astype('float32') / np.float32(7.0))).astype('float32')
+        df['sin_sem'] = ang.apply(np.sin).astype('float32')
+        df['cos_sem'] = ang.apply(np.cos).astype('float32')
+        return df
+
+    @staticmethod
+    def __add_parado_features(df: pd.DataFrame, km: pd.Series) -> pd.DataFrame:
+        flag_parado: pd.Series = (km == 0).astype('int8')
+        df['flag_parado'] = flag_parado
+
+        start_seq: pd.Series = ((flag_parado == 1) & (flag_parado.shift(1).fillna(0).astype('int8') == 0)).astype('int8')
+        bloco_id: pd.Series = start_seq.cumsum()
+        df['_bloco_id'] = bloco_id
+        seq: pd.Series = df.groupby('_bloco_id', sort=False)['flag_parado'].cumcount().add(1)
+        df['dias_parado_seq'] = seq.where(flag_parado == 1, 0).astype('int16')
+        df.drop(columns=['_bloco_id'], inplace=True)
+        df['pct_parado_7d'] = flag_parado.rolling(window=7, min_periods=1).mean().astype('float32')
+        df['pct_parado_14d'] = flag_parado.rolling(window=14, min_periods=1).mean().astype('float32')
         return df
