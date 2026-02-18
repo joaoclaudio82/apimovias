@@ -1,4 +1,4 @@
 .PHONY: api
 
 api:
-	uvicorn api:app --reload
+	uvicorn api.main:app --reload

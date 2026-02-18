@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional, Set, Tuple, List, Callable, Dict
+from typing import Optional, Set, Tuple, List, Callable, Dict, Iterable
 from starlette.responses import FileResponse
 from api.repositories.relatorio_repository import RelatorioRepository
 from api.settings import settings
@@ -79,20 +79,63 @@ class RelatorioService:
         if not vei_ids:
             return
 
-        for veiculos in RelatorioRepository.get_veiculos_stream(vei_ids, data_ini_list, data_fim_list):
-            df: pd.DataFrame = pd.DataFrame.from_records(veiculos)
-            if df.empty:
-                continue
+        batch_size = max(1, int(settings.RELATORIO_QUERY_BATCH_SIZE))
+        for batch_vei_ids, batch_data_ini, batch_data_fim in cls.__iter_param_batches(
+            vei_ids,
+            data_ini_list,
+            data_fim_list,
+            batch_size=batch_size
+        ):
+            for veiculos in RelatorioRepository.get_veiculos_stream(batch_vei_ids, batch_data_ini, batch_data_fim):
+                cls.__append_vehicle_rows(veiculos, existing_keys, path)
 
-            df = cls.__normalize_dataframe(df)
-            df = df.drop_duplicates(subset=['veiculo_id', 'data'])
-            df['__key'] = list(zip(df['veiculo_id'].astype(str), df['data'].astype(str)))
-            df = df[~df['__key'].isin(existing_keys)].drop(columns='__key')
-            if df.empty:
-                continue
+    @classmethod
+    def create_and_append_csv_all(
+        cls,
+        path: Path = settings.CSV_PATH
+    ) -> None:
+        cls.__validate_existing_csv_schema(path)
+        existing_keys: Set[Tuple[str, str]] = cls._existing_keys(path)
 
-            existing_keys.update(zip(df['veiculo_id'].astype(str), df['data'].astype(str)))
-            CsvUtils.atomic_append_dataframe(df, path)
+        for veiculos in RelatorioRepository.get_all_veiculos_stream():
+            cls.__append_vehicle_rows(veiculos, existing_keys, path)
+
+    @classmethod
+    def __append_vehicle_rows(
+        cls,
+        veiculos: List[Dict[str, object]],
+        existing_keys: Set[Tuple[str, str]],
+        path: Path
+    ) -> None:
+        df: pd.DataFrame = pd.DataFrame.from_records(veiculos)
+        if df.empty:
+            return
+
+        df = cls.__normalize_dataframe(df)
+        df = df.drop_duplicates(subset=['veiculo_id', 'data'])
+        df['__key'] = list(zip(df['veiculo_id'].astype(str), df['data'].astype(str)))
+        df = df[~df['__key'].isin(existing_keys)].drop(columns='__key')
+        if df.empty:
+            return
+
+        existing_keys.update(zip(df['veiculo_id'].astype(str), df['data'].astype(str)))
+        CsvUtils.atomic_append_dataframe(df, path)
+
+    @staticmethod
+    def __iter_param_batches(
+        vei_ids: List[int],
+        data_ini_list: List[Optional[date]],
+        data_fim_list: List[Optional[date]],
+        batch_size: int
+    ) -> Iterable[Tuple[List[int], List[Optional[date]], List[Optional[date]]]]:
+        total = len(vei_ids)
+        for start in range(0, total, batch_size):
+            end = start + batch_size
+            yield (
+                vei_ids[start:end],
+                data_ini_list[start:end],
+                data_fim_list[start:end],
+            )
 
     @staticmethod
     def _existing_keys(path: Path = settings.CSV_PATH) -> Set[Tuple[str, str]]:

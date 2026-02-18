@@ -2,7 +2,6 @@ import logging
 import time
 from fastapi import APIRouter, HTTPException, status
 from api.schemas.relatorio_request import RelatorioRequest
-from api.schemas.relatorio_stream_request import RelatorioStreamRequest
 from api.services.relatorio_service import RelatorioService
 
 router = APIRouter(prefix="/relatorios", tags=["Relatório"])
@@ -44,30 +43,20 @@ def create_csv(payload: RelatorioRequest):
         )
 
 @router.post("/batch", status_code=status.HTTP_204_NO_CONTENT)
-def create_csv_batch(payload: RelatorioStreamRequest):
+def create_csv_batch():
     start = time.perf_counter()
-    ids = list(range(payload.id_start, payload.id_end + 1))
     try:
-        RelatorioService.create_and_append_csv(
-            id_start=payload.id_start,
-            id_end=payload.id_end,
-            data_ini=payload.data_ini,
-            data_fim=payload.data_fim
-        )
+        RelatorioService.create_and_append_csv_all()
     except Exception:
         elapsed = time.perf_counter() - start
         logger.exception(
-            "create_csv_batch failed | veiculos=%d | ids=%s | elapsed_ms=%.2f",
-            len(ids),
-            ids,
+            "create_csv_batch failed | mode=all_veiculos_all_dias | elapsed_ms=%.2f",
             elapsed * 1000.0,
         )
         raise
     else:
         elapsed = time.perf_counter() - start
         logger.info(
-            "create_csv_batch ok | veiculos=%d | ids=%s | elapsed_ms=%.2f",
-            len(ids),
-            ids,
+            "create_csv_batch ok | mode=all_veiculos_all_dias | elapsed_ms=%.2f",
             elapsed * 1000.0,
         )
