@@ -161,12 +161,19 @@ class RelatorioRepository:
             return [dict(row) for row in result.mappings().all()]
 
     @staticmethod
-    def get_veiculos_stream(vei_ids: List[int], data_ini_list: List[Optional[date]], data_fim_list: List[Optional[date]]) -> Iterable[List[Dict[str, Any]]]:
+    def get_veiculos_stream(
+        vei_ids: List[int],
+        data_ini_list: List[Optional[date]],
+        data_fim_list: List[Optional[date]],
+        vehicles_per_chunk: int = 1
+    ) -> Iterable[List[Dict[str, Any]]]:
         if not vei_ids:
             return
 
         if not (len(vei_ids) == len(data_ini_list) == len(data_fim_list)):
             raise ValueError("Listas de parâmetros com tamanhos diferentes.")
+
+        vehicles_per_chunk = max(1, int(vehicles_per_chunk))
 
         params: Dict[str, Any] = {
           "vei_ids": vei_ids,
@@ -176,8 +183,10 @@ class RelatorioRepository:
 
         with engine.connect() as connection:
             result = connection.execution_options(stream_results=True).execute(text(SQL), params)
+            rows_chunk: List[Dict[str, Any]] = []
             rows_by_vehicle: List[Dict[str, Any]] = []
             current_vehicle_id: Optional[int] = None
+            vehicles_in_chunk = 0
 
             for row in result.mappings():
                 row_dict = dict(row)
@@ -187,23 +196,45 @@ class RelatorioRepository:
                     current_vehicle_id = row_vehicle_id
                 elif row_vehicle_id != current_vehicle_id:
                     if rows_by_vehicle:
-                        yield rows_by_vehicle
-                    rows_by_vehicle = []
+                        rows_chunk.extend(rows_by_vehicle)
+                        vehicles_in_chunk += 1
+                        rows_by_vehicle = []
+
+                    if vehicles_in_chunk >= vehicles_per_chunk and rows_chunk:
+                        yield rows_chunk
+                        rows_chunk = []
+                        vehicles_in_chunk = 0
+
                     current_vehicle_id = row_vehicle_id
 
                 rows_by_vehicle.append(row_dict)
 
             if rows_by_vehicle:
-                yield rows_by_vehicle
+                rows_chunk.extend(rows_by_vehicle)
+                vehicles_in_chunk += 1
+
+            if rows_chunk:
+                yield rows_chunk
 
     @staticmethod
-    def get_all_veiculos_stream() -> Iterable[List[Dict[str, Any]]]:
+    def get_all_veiculos_stream(batch_size: int = 250) -> Iterable[List[Dict[str, Any]]]:
+        batch_size = max(1, int(batch_size))
+
         with engine.connect() as connection:
             vei_ids = [int(row[0]) for row in connection.execute(text("SELECT id FROM public.veiculo ORDER BY id"))]
 
         if not vei_ids:
             return
 
-        data_ini_list: List[Optional[date]] = [None] * len(vei_ids)
-        data_fim_list: List[Optional[date]] = [None] * len(vei_ids)
-        yield from RelatorioRepository.get_veiculos_stream(vei_ids, data_ini_list, data_fim_list)
+        total = len(vei_ids)
+        for start in range(0, total, batch_size):
+            end = start + batch_size
+            batch_vei_ids = vei_ids[start:end]
+            data_ini_list: List[Optional[date]] = [None] * len(batch_vei_ids)
+            data_fim_list: List[Optional[date]] = [None] * len(batch_vei_ids)
+            yield from RelatorioRepository.get_veiculos_stream(
+                batch_vei_ids,
+                data_ini_list,
+                data_fim_list,
+                vehicles_per_chunk=batch_size
+            )

@@ -204,3 +204,5 @@ __marimo__/
 
 # CSV
 *.csv
+*.lock
+*.csv.lock

@@ -86,7 +86,12 @@ class RelatorioService:
             data_fim_list,
             batch_size=batch_size
         ):
-            for veiculos in RelatorioRepository.get_veiculos_stream(batch_vei_ids, batch_data_ini, batch_data_fim):
+            for veiculos in RelatorioRepository.get_veiculos_stream(
+                batch_vei_ids,
+                batch_data_ini,
+                batch_data_fim,
+                vehicles_per_chunk=batch_size
+            ):
                 cls.__append_vehicle_rows(veiculos, existing_keys, path)
 
     @classmethod
@@ -96,8 +101,9 @@ class RelatorioService:
     ) -> None:
         cls.__validate_existing_csv_schema(path)
         existing_keys: Set[Tuple[str, str]] = cls._existing_keys(path)
+        batch_size = max(1, int(settings.RELATORIO_QUERY_BATCH_SIZE))
 
-        for veiculos in RelatorioRepository.get_all_veiculos_stream():
+        for veiculos in RelatorioRepository.get_all_veiculos_stream(batch_size=batch_size):
             cls.__append_vehicle_rows(veiculos, existing_keys, path)
 
     @classmethod
