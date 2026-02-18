@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional, Set, Tuple, List, Callable, Dict, Iterable
@@ -56,7 +57,7 @@ class RelatorioService:
         path: Path = settings.CSV_PATH
     ) -> None:
         cls.__validate_existing_csv_schema(path)
-        existing_keys: Set[Tuple[str, str]] = cls._existing_keys()
+        existing_keys: Set[Tuple[str, str]] = cls._existing_keys(path)
         latest_by_vehicle = cls._latest_dates_by_vehicle(path)
         vei_ids: List[int] = []
         data_ini_list: List[Optional[date]] = []
@@ -80,19 +81,63 @@ class RelatorioService:
             return
 
         batch_size = max(1, int(settings.RELATORIO_QUERY_BATCH_SIZE))
-        for batch_vei_ids, batch_data_ini, batch_data_fim in cls.__iter_param_batches(
+        parallel_workers = max(1, int(settings.RELATORIO_QUERY_PARALLEL_WORKERS))
+        param_batches = list(cls.__iter_param_batches(
             vei_ids,
             data_ini_list,
             data_fim_list,
             batch_size=batch_size
+        ))
+
+        worker_count = min(parallel_workers, len(param_batches))
+        if worker_count <= 1:
+            for batch_vei_ids, batch_data_ini, batch_data_fim in param_batches:
+                for veiculos in RelatorioRepository.get_veiculos_stream(
+                    batch_vei_ids,
+                    batch_data_ini,
+                    batch_data_fim,
+                    vehicles_per_chunk=batch_size
+                ):
+                    cls.__append_vehicle_rows(veiculos, existing_keys, path)
+            return
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(
+                    cls.__fetch_batch_rows,
+                    batch_vei_ids,
+                    batch_data_ini,
+                    batch_data_fim,
+                    batch_size
+                )
+                for batch_vei_ids, batch_data_ini, batch_data_fim in param_batches
+            ]
+            try:
+                for future in as_completed(futures):
+                    veiculos = future.result()
+                    if veiculos:
+                        cls.__append_vehicle_rows(veiculos, existing_keys, path)
+            except Exception:
+                for future in futures:
+                    future.cancel()
+                raise
+
+    @staticmethod
+    def __fetch_batch_rows(
+        vei_ids: List[int],
+        data_ini_list: List[Optional[date]],
+        data_fim_list: List[Optional[date]],
+        batch_size: int
+    ) -> List[Dict[str, object]]:
+        rows: List[Dict[str, object]] = []
+        for veiculos in RelatorioRepository.get_veiculos_stream(
+            vei_ids,
+            data_ini_list,
+            data_fim_list,
+            vehicles_per_chunk=batch_size
         ):
-            for veiculos in RelatorioRepository.get_veiculos_stream(
-                batch_vei_ids,
-                batch_data_ini,
-                batch_data_fim,
-                vehicles_per_chunk=batch_size
-            ):
-                cls.__append_vehicle_rows(veiculos, existing_keys, path)
+            rows.extend(veiculos)
+        return rows
 
     @classmethod
     def create_and_append_csv_all(
@@ -102,8 +147,12 @@ class RelatorioService:
         cls.__validate_existing_csv_schema(path)
         existing_keys: Set[Tuple[str, str]] = cls._existing_keys(path)
         batch_size = max(1, int(settings.RELATORIO_QUERY_BATCH_SIZE))
+        parallel_workers = max(1, int(settings.RELATORIO_QUERY_PARALLEL_WORKERS))
 
-        for veiculos in RelatorioRepository.get_all_veiculos_stream(batch_size=batch_size):
+        for veiculos in RelatorioRepository.get_all_veiculos_stream(
+            batch_size=batch_size,
+            parallel_workers=parallel_workers
+        ):
             cls.__append_vehicle_rows(veiculos, existing_keys, path)
 
     @classmethod

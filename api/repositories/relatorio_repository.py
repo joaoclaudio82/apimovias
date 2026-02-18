@@ -1,5 +1,6 @@
 from datetime import date
 from typing import Iterable, Optional, Dict, List, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from sqlalchemy import text
 from api.database import engine
 
@@ -26,41 +27,54 @@ params AS (
   JOIN public.veiculo v
     ON v.id = p.vei_id
 ),
-trips_day AS (
+global_bounds AS (
+  SELECT
+    MIN(p.end_dh_ini) AS min_end_dh,
+    MAX(p.end_dh_fim_exclusive) AS max_end_dh
+  FROM params p
+),
+trips_prefiltered AS (
   SELECT
     a.vei_id,
     (a.end_dh::date) AS data,
-    GREATEST(0, LEAST(COALESCE(a.distance_travel, a.end_odometer - a.start_odometer, 0), 1200)) AS dist_km,
-    GREATEST(0, LEAST(COALESCE(a.timings_trip_time, a.timings_on_time, a.timings_work_time, 0), 86400)) AS atividade_seg,
-    a.start_odometer AS odo_ini_viagem,
-    a.end_odometer   AS odo_fim_viagem
+    a.distance_travel,
+    a.start_odometer,
+    a.end_odometer,
+    a.timings_trip_time,
+    a.timings_on_time,
+    a.timings_work_time
   FROM trips.alltrips a
-  JOIN params p ON p.vei_id = a.vei_id
+  JOIN params p
+    ON p.vei_id = a.vei_id
+   AND a.end_dh >= p.end_dh_ini
+   AND a.end_dh < p.end_dh_fim_exclusive
+  JOIN global_bounds g
+    ON true
   WHERE a.end_dh IS NOT NULL
     AND a.start_dh IS NOT NULL
     AND a.end_dh >= a.start_dh
-    AND a.end_dh >= p.end_dh_ini
-    AND a.end_dh < p.end_dh_fim_exclusive
+    AND a.end_dh >= g.min_end_dh
+    AND a.end_dh < g.max_end_dh
 ),
 day_agg AS (
   SELECT
-    vei_id,
-    data,
-    MIN(odo_ini_viagem) AS odo_ini_dia,
-    MAX(odo_fim_viagem) AS odo_fim_dia,
-    COUNT(*)            AS viagens_qtd,
-    SUM(dist_km)        AS dist_total_km,
-    SUM(atividade_seg)   AS atividade_total_seg
-  FROM trips_day
-  GROUP BY vei_id, data
+    t.vei_id,
+    t.data,
+    MIN(t.start_odometer) AS odo_ini_dia,
+    MAX(t.end_odometer) AS odo_fim_dia,
+    COUNT(*) AS viagens_qtd,
+    SUM(GREATEST(0, LEAST(COALESCE(t.distance_travel, t.end_odometer - t.start_odometer, 0), 1200))) AS dist_total_km,
+    SUM(GREATEST(0, LEAST(COALESCE(t.timings_trip_time, t.timings_on_time, t.timings_work_time, 0), 86400))) AS atividade_total_seg
+  FROM trips_prefiltered t
+  GROUP BY t.vei_id, t.data
 ),
 day_bounds AS (
   SELECT
-    vei_id,
+    d.vei_id,
     MIN(data) AS min_data,
     MAX(data) AS max_data
-  FROM day_agg
-  GROUP BY vei_id
+  FROM day_agg d
+  GROUP BY d.vei_id
 ),
 range_dates AS (
   SELECT
@@ -75,6 +89,9 @@ calendar AS (
   SELECT r.vei_id, gs::date AS data
   FROM range_dates r
   CROSS JOIN LATERAL generate_series(r.d_ini, r.d_fim, interval '1 day') gs
+  WHERE r.d_ini IS NOT NULL
+    AND r.d_fim IS NOT NULL
+    AND r.d_ini <= r.d_fim
 ),
 joined AS (
   SELECT
@@ -149,6 +166,23 @@ ORDER BY c.vei_id, c.data;
 
 class RelatorioRepository:
     @staticmethod
+    def __fetch_rows_for_ids(batch_vei_ids: List[int]) -> List[Dict[str, Any]]:
+        if not batch_vei_ids:
+            return []
+
+        data_ini_list: List[Optional[date]] = [None] * len(batch_vei_ids)
+        data_fim_list: List[Optional[date]] = [None] * len(batch_vei_ids)
+        rows: List[Dict[str, Any]] = []
+        for chunk in RelatorioRepository.get_veiculos_stream(
+            batch_vei_ids,
+            data_ini_list,
+            data_fim_list,
+            vehicles_per_chunk=len(batch_vei_ids)
+        ):
+            rows.extend(chunk)
+        return rows
+
+    @staticmethod
     def get_veiculos(veiculo_id: int, data_ini: Optional[date], data_fim: Optional[date]) -> List[Dict[str, Any]]:
         params: Dict[str, Any] = {
           "vei_ids": [int(veiculo_id)],
@@ -217,8 +251,9 @@ class RelatorioRepository:
                 yield rows_chunk
 
     @staticmethod
-    def get_all_veiculos_stream(batch_size: int = 250) -> Iterable[List[Dict[str, Any]]]:
+    def get_all_veiculos_stream(batch_size: int = 350, parallel_workers: int = 1) -> Iterable[List[Dict[str, Any]]]:
         batch_size = max(1, int(batch_size))
+        parallel_workers = max(1, int(parallel_workers))
 
         with engine.connect() as connection:
             vei_ids = [int(row[0]) for row in connection.execute(text("SELECT id FROM public.veiculo ORDER BY id"))]
@@ -227,14 +262,30 @@ class RelatorioRepository:
             return
 
         total = len(vei_ids)
+        batches: List[List[int]] = []
         for start in range(0, total, batch_size):
             end = start + batch_size
-            batch_vei_ids = vei_ids[start:end]
-            data_ini_list: List[Optional[date]] = [None] * len(batch_vei_ids)
-            data_fim_list: List[Optional[date]] = [None] * len(batch_vei_ids)
-            yield from RelatorioRepository.get_veiculos_stream(
-                batch_vei_ids,
-                data_ini_list,
-                data_fim_list,
-                vehicles_per_chunk=batch_size
-            )
+            batches.append(vei_ids[start:end])
+
+        worker_count = min(parallel_workers, len(batches))
+        if worker_count <= 1:
+            for batch_vei_ids in batches:
+                rows = RelatorioRepository.__fetch_rows_for_ids(batch_vei_ids)
+                if rows:
+                    yield rows
+            return
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(RelatorioRepository.__fetch_rows_for_ids, batch_vei_ids)
+                for batch_vei_ids in batches
+            ]
+            try:
+                for future in as_completed(futures):
+                    rows = future.result()
+                    if rows:
+                        yield rows
+            except Exception:
+                for future in futures:
+                    future.cancel()
+                raise

@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     DATABASE_USER: str
     DATABASE_PASSWORD: str
     DATABASE_SSL_MODE: str
-    RELATORIO_QUERY_BATCH_SIZE: int = 250
+    RELATORIO_QUERY_BATCH_SIZE: int = 350
+    RELATORIO_QUERY_PARALLEL_WORKERS: int = 4
 
     # Paths
     ROOT_PATH: Path = Path(__file__).resolve().parents[1]
