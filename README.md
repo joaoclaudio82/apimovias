@@ -1,98 +1,66 @@
-# apimovias
+# Movias Stack (Root)
 
-API em **FastAPI** para gerar e baixar um **CSV** (em `data/movias.csv`) com métricas/features diárias por veículo a partir de dados no **PostgreSQL**.
+Stack unificado com:
 
-## Pré-requisitos
+- `extractor-api` (FastAPI): gera/atualiza `extractor/data/movias.csv`.
+- `ai-api` (FastAPI): atualiza perfis e executa predição.
+- Banco do `extractor`: externo (já existente), configurado via `DATABASE_*` no `.env` da raiz.
+- Volume compartilhado do CSV: `./extractor/data` montado no `ai-api` em `/shared`.
 
-- Python 3.10+ e `pip`
-- Docker + Docker Compose
-- (Opcional) `make` disponível no terminal
+## Subir tudo
 
-## Estrutura completa do projeto
-
-- **`api/`**: código da aplicação.
-  - **`main.py`**: cria o `FastAPI` e registra as rotas.
-  - **`routes/`**: endpoints HTTP (hoje: `relatorio_route.py`).
-  - **`services/`**: regras de negócio + processamento com Pandas/Numpy (gera/append no CSV).
-  - **`repositories/`**: acesso ao banco (query SQL via SQLAlchemy).
-  - **`schemas/`**: modelos Pydantic dos payloads.
-  - **`database.py`**: cria o `engine` do SQLAlchemy (Postgres).
-  - **`settings.py`**: lê config do `.env` e define paths (ex.: `data/movias.csv`).
-  - **`utils/`**: helpers simples (ex.: verificação de arquivo vazio).
-- **`data/sql/mock.sql`**: schema/tabelas e dados mock usados pelo Postgres do compose.
-- **`docs/`**: materiais auxiliares (notebook e script de extração).
-- **`docker-compose.dev.yml`**: sobe um Postgres local e aplica o `mock.sql` no init.
-- **`Makefile`**: atalho para rodar a API (`make api`).
-- **`requirements.txt`**: dependências Python.
-
-## Portas expostas
-
-- **API FastAPI**: `8000` (padrão do `uvicorn`)
-- **PostgreSQL (Docker)**: `5432`
-
-## Fluxo (request → banco → CSV)
-
-1. Você chama um endpoint em `/relatorios`.
-2. A rota chama `RelatorioService`.
-3. O service busca dados no banco via `RelatorioRepository` (query em `trips.alltrips` + `public.veiculo`).
-4. O service:
-   - normaliza datas e métricas (km/h do dia),
-   - aplica tratamento de outliers,
-   - cria features por janela (7/14/21/28 dias) e flags (fim de semana, parado etc.),
-   - escreve/append no CSV `data/movias.csv` evitando duplicar por chave `(veiculo_id, data)`.
-5. Você pode baixar o CSV pelo endpoint de download.
-
-## Endpoints
-
-- **GET** `/relatorios/download`
-  - Retorna o arquivo `data/movias.csv` (404 se não existir/estiver vazio).
-- **POST** `/relatorios/`
-  - Body: `{ "veiculo_id": 1, "data_ini": "2025-01-01", "data_fim": "2025-01-31" }`
-  - Gera/append no CSV para **um** veículo (na implementação atual, `id_start=id_end=veiculo_id`).
-- **POST** `/relatorios/batch`
-  - Body: `{ "id_start": 1, "id_end": 10, "data_ini": "2025-01-01", "data_fim": "2025-01-31" }`
-  - Gera/append no CSV para um range de veículos.
-
-## Como rodar do zero
-
-### 1) Subir o Postgres (com dados mock)
+1. Copie o arquivo de ambiente:
 
 ```bash
-docker compose -f docker-compose.dev.yml up -d
+cp .env.example .env
 ```
 
-Isso cria um Postgres local em `localhost:5432` e executa `data/sql/mock.sql` no init.
-
-### 2) Criar `.env`
-
-Crie um arquivo `.env` na raiz (mesmo nível de `requirements.txt`) com:
-
-```env
-DATABASE_HOST=localhost
-DATABASE_PORT=5432
-DATABASE_DATABASE=movias
-DATABASE_USER=postgres
-DATABASE_PASSWORD=postgres
-DATABASE_SSL_MODE=disable
-```
-
-### 3) Instalar dependências e rodar a API
+2. Suba o stack:
 
 ```bash
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-make api
+docker compose up -d --build
 ```
 
-A API sobe em modo reload via `uvicorn`. Você pode acessar:
-
-- `http://localhost:8000/docs` (Swagger)
-- `http://localhost:8000/redoc` (ReDoc)
-
-Se não tiver `make`, rode diretamente:
+Ou via Makefile:
 
 ```bash
-uvicorn api.main:app --reload
+make up
 ```
 
+Antes de subir, ajuste no `.env` as variáveis do banco externo do extractor:
+
+- `DATABASE_HOST`
+- `DATABASE_PORT`
+- `DATABASE_DATABASE`
+- `DATABASE_USER`
+- `DATABASE_PASSWORD`
+- `DATABASE_SSL_MODE`
+
+## Portas padrão
+
+- Extractor API: `http://localhost:8000`
+- AI API: `http://localhost:8010`
+
+## Fluxo integrado
+
+Quando `AI_INTEGRATION_ENABLED=true`:
+
+1. `POST /relatorios/` ou `POST /relatorios/batch` no `extractor-api`.
+2. O extractor atualiza o CSV local.
+3. O extractor autentica no `ai-api` com conta de serviço.
+4. O extractor solicita atualização de perfis nos targets:
+   - `km_dia_clean`
+   - `h_dia_clean`
+5. O `ai-api` lê o arquivo compartilhado em `AI_SHARED_CSV_PATH` (padrão: `/shared/movias.csv`).
+
+Também existe sincronização manual:
+
+- `POST /relatorios/sync-ai`
+
+## Comandos úteis
+
+```bash
+make ps
+make logs
+make down
+```

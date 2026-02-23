@@ -1,0 +1,37 @@
+[build-system]
+requires = []
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "viscosidade-ai"
+version = "0.1.0"
+description = "API para análise de viscosidade"
+
+[tool.ruff]
+line-length = 88
+extend-exclude = ['migrations', 'notebooks']
+
+[tool.ruff.lint]
+ignore = ["PLR0913", "PLR0917"]
+preview = true
+select = ['I', 'F', 'E', 'W', 'PL', 'PT', 'FAST']
+
+[tool.ruff.format]
+preview = true
+quote-style = 'single'
+
+[tool.pytest.ini_options]
+pythonpath = "."
+addopts = '-p no:warnings'
+asyncio_default_fixture_loop_scope = 'function'
+
+[tool.taskipy.tasks]
+lint = "ruff check . && ruff check . --diff"
+format = "ruff check . --fix && ruff format ."
+run_api = "set PYTHONPATH=. && fastapi run api/app.py --port 8010"
+run_app = "streamlit run app_main.py"
+pre_test = "task lint"
+test_api = "pytest api -s -x --cov=api -vv"
+test     = "pytest chemai -s -x --cov=chemai -vv"
+post_test = "coverage html"
+notebooks = "jupyter-lab notebooks"

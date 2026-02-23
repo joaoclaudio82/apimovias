@@ -1,0 +1,30 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local envs and secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Coverage outputs
+.coverage
+htmlcov/
+
+# Local SQLite files
+*.db
+*.db-*
+database.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log

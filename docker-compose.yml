@@ -1,13 +1,60 @@
+name: movias
+
 services:
-  api:
+  ai-api:
     build:
-      context: .
+      context: ./ai
       dockerfile: Dockerfile
-    container_name: movias_api
+    container_name: movias-ai-api
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      DATABASE_URL: ${AI_DATABASE_URL:-sqlite+aiosqlite:////app/data/database.db}
+      SECRET_KEY: ${AI_SECRET_KEY:-your-secret-key}
+      ALGORITHM: ${AI_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${AI_ACCESS_TOKEN_EXPIRE_MINUTES:-30}
     ports:
-      - "8000:8000"
+      - "${AI_API_PORT:-8010}:8010"
     volumes:
-      - ./data:/app/data
+      - ai-data:/app/data
+      - ./ai/models:/app/models:ro
+      - ./ai/config:/app/config:ro
+      - ./extractor/data:/shared:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/docs', timeout=5)"]
+      interval: 20s
+      timeout: 7s
+      retries: 6
+
+  extractor-api:
+    build:
+      context: ./extractor
+      dockerfile: Dockerfile
+    container_name: movias-extractor-api
+    restart: unless-stopped
+    depends_on:
+      ai-api:
+        condition: service_started
+    environment:
+      DATABASE_HOST: ${DATABASE_HOST}
+      DATABASE_PORT: ${DATABASE_PORT}
+      DATABASE_DATABASE: ${DATABASE_DATABASE}
+      DATABASE_USER: ${DATABASE_USER}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      DATABASE_SSL_MODE: ${DATABASE_SSL_MODE}
+      RELATORIO_QUERY_BATCH_SIZE: ${RELATORIO_QUERY_BATCH_SIZE:-350}
+      RELATORIO_QUERY_PARALLEL_WORKERS: ${RELATORIO_QUERY_PARALLEL_WORKERS:-4}
+      AI_INTEGRATION_ENABLED: ${AI_INTEGRATION_ENABLED:-true}
+      AI_API_BASE_URL: http://ai-api:8010
+      AI_SERVICE_CLIENT_ID: ${AI_SERVICE_CLIENT_ID:-movias}
+      AI_SERVICE_CLIENT_SECRET: ${AI_SERVICE_CLIENT_SECRET:-moviaskey}
+      AI_SYNC_TARGETS: ${AI_SYNC_TARGETS:-km_dia_clean,h_dia_clean}
+      AI_SHARED_CSV_PATH: ${AI_SHARED_CSV_PATH:-/shared/movias.csv}
+      AI_HTTP_TIMEOUT_SECONDS: ${AI_HTTP_TIMEOUT_SECONDS:-180}
+      LOG_LEVEL: ${EXTRACTOR_LOG_LEVEL:-INFO}
+    ports:
+      - "${EXTRACTOR_API_PORT:-8000}:8000"
+    volumes:
+      - ./extractor/data:/app/data
+
+volumes:
+  ai-data:
