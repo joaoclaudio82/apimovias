@@ -1,15 +1,13 @@
 # api/routers/vehicle_profiles.py
 
-from fastapi import APIRouter, HTTPException, Depends, Form
+from fastapi import APIRouter, HTTPException, Depends
 from http import HTTPStatus
 from typing import Annotated
-import pandas as pd
 import logging
 
 from api.database import get_session
 from api.services.vehicle_profile_service import VehicleProfileService
 from api.schemas.vehicle_profile_schemas import (
-    ProfileImportResponse,
     ProfileUpdateResponse,
     ProfileUpdatePathRequest,
     VehicleInfoResponse,
@@ -28,78 +26,6 @@ def get_service(session: Session) -> VehicleProfileService:
     """Dependency para obter service"""
     return VehicleProfileService(session)
 
-
-@router.post(
-    '/import',
-    response_model=ProfileImportResponse,
-    status_code=HTTPStatus.CREATED,
-    summary='Importa perfis de arquivos'
-)
-async def import_profiles(
-    service: VehicleProfileService = Depends(get_service),
-    target: str = Form(..., description="Target: 'km_dia_clean' ou 'h_dia_clean'"),
-    profile_dir: str = Form(..., description="Diretório com arquivos do perfil"),
-    segmentation_file_path: str = Form(..., description="Caminho do arquivo CSV com veiculo_id, target, segment")
-):
-    """
-    Importa perfis de arquivos salvos pelo VehicleProfile
-    
-    Requer arquivo CSV de segmentação com colunas:
-    - veiculo_id: ID do veículo
-    - target: target do perfil (deve ser igual ao parâmetro target)
-    - segment: número do segmento (0, 1, 2, ...)
-    """
-    logger.info('Importação de perfis solicitada')
-    
-    try:
-        # Ler arquivo de segmentação do path fornecido
-        try:
-            df_segmentation = pd.read_csv(segmentation_file_path)
-        except FileNotFoundError:
-            raise HTTPException(
-                status_code=HTTPStatus.NOT_FOUND,
-                detail=f"Arquivo de segmentação não encontrado: {segmentation_file_path}"
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail=f"Erro ao ler arquivo de segmentação: {str(e)}"
-            )
-        
-        # Validar colunas
-        required_cols = ['veiculo_id', 'target', 'segment']
-        missing = [col for col in required_cols if col not in df_segmentation.columns]
-        if missing:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail=f"Colunas faltando no arquivo de segmentação: {missing}"
-            )
-        
-        # Importar
-        result = await service.import_from_file(
-            target=target,
-            profile_dir=profile_dir,
-            df_segmentation=df_segmentation
-        )
-        
-        return ProfileImportResponse(
-            target=result['target'],
-            category=result['category'],
-            n_vehicles=result['n_vehicles'],
-            message='Importação concluída com sucesso'
-        )
-        
-    except HTTPException:
-        raise
-    except FileNotFoundError as e:
-        logger.error(f"Arquivo não encontrado: {e}")
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail=f"Arquivo não encontrado: {str(e)}")
-    except ValueError as e:
-        logger.error(f"Erro de validação: {e}")
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        logger.exception("Erro ao importar perfis")
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=f"Erro ao importar perfis: {str(e)}")
 
 @router.post(
     '/update-csv-path',
@@ -231,7 +157,6 @@ async def get_status():
         'status': 'ok',
         'message': 'Serviço de perfis disponível',
         'endpoints': [
-            '/import',
             '/update-csv-path',
             '/profile/{vehicle_id}',
             '/vehicle/{vehicle_id}/info',
