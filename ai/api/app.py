@@ -8,7 +8,9 @@ from pathlib import Path
 
 from api.database import engine, session_context
 from api.models import table_registry, User
-from api.routers import auth, users, vehicle_profiles, predictions
+from api.routers.auth import router as auth_router
+from api.routers.users import router as users_router
+from api.routers.vehicle_profiles import router as vehicle_profiles_router
 from api.schemas import Message
 from api.schemas.user_schemas import UserType
 from api.security import get_password_hash
@@ -97,7 +99,15 @@ async def read_root():
 
 
 # Incluir routers
-app.include_router(auth.router)
-app.include_router(users.router)
-app.include_router(vehicle_profiles.router)
-app.include_router(predictions.router)
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(vehicle_profiles_router)
+
+try:
+    from api.routers.predictions import router as predictions_router
+    app.include_router(predictions_router)
+except Exception as exc:
+    logger.warning(
+        'Router de predições desabilitado no startup (%s)',
+        str(exc),
+    )

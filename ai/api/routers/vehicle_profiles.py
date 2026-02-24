@@ -1,10 +1,9 @@
 # api/routers/vehicle_profiles.py
 
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, Form
 from http import HTTPStatus
 from typing import Annotated, Optional
 import pandas as pd
-import io
 import logging
 
 from api.database import get_session
@@ -109,60 +108,6 @@ async def import_profiles(
     except Exception as e:
         logger.exception("Erro ao importar perfis")
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=f"Erro ao importar perfis: {str(e)}")
-
-@router.post(
-    '/update-csv',
-    response_model=ProfileUpdateResponse,
-    summary='Atualiza perfis via CSV'
-)
-async def update_profiles_csv(
-    current_auth: CurrentAuth,
-    service: VehicleProfileService = Depends(get_service),
-    target: str = Form(..., description="Target: 'km_dia_clean' ou 'h_dia_clean'"),
-    file: UploadFile = File(..., description="Arquivo CSV")
-):
-    """
-    Atualiza perfis de veículos a partir de arquivo CSV
-    
-    CSV deve conter colunas: veiculo_id, data (DD/MM/YYYY), {target}
-    """
-    if isinstance(current_auth, dict) and current_auth.get('is_service'):
-        requester = f"Serviço: {current_auth['service_name']}"
-    else:
-        requester = f"Usuário: {current_auth.username}"
-    
-    logger.info(f'Atualização de perfis via CSV solicitada por {requester}')
-    
-    try:
-        if not file.filename.endswith('.csv'):
-            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Arquivo deve ser CSV")
-        
-        contents = await file.read()
-        df = pd.read_csv(io.BytesIO(contents))
-        
-        required_cols = ['veiculo_id', 'data', target]
-        missing = [col for col in required_cols if col not in df.columns]
-        if missing:
-            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=f"Colunas faltando no CSV: {missing}")
-        
-        df['data'] = pd.to_datetime(df['data'], format='%d/%m/%Y')
-        result = await service.update_from_dataframe(target, df)
-        
-        return ProfileUpdateResponse(
-            target=target,
-            n_vehicles=result['n_vehicles'],
-            message='Atualização concluída com sucesso'
-        )
-        
-    except HTTPException:
-        raise
-    except pd.errors.ParserError as e:
-        logger.error(f"Erro ao parsear CSV: {e}")
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=f"Erro ao parsear CSV: {str(e)}")
-    except Exception as e:
-        logger.exception("Erro ao atualizar perfis via CSV")
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=f"Erro ao atualizar perfis: {str(e)}")
-
 
 @router.post(
     '/update-csv-path',
@@ -310,7 +255,6 @@ async def get_status(current_auth: CurrentAuth):
         'message': f'Serviço de perfis disponível para {requester}',
         'endpoints': [
             '/import',
-            '/update-csv',
             '/update-csv-path',
             '/profile/{vehicle_id}',
             '/vehicle/{vehicle_id}/info',

@@ -2,7 +2,11 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
+    model_config = SettingsConfigDict(
+        env_file='.env',
+        env_file_encoding='utf-8',
+        extra='ignore',
+    )
 
     # Database
     DATABASE_HOST: str
@@ -13,6 +17,7 @@ class Settings(BaseSettings):
     DATABASE_SSL_MODE: str
     RELATORIO_QUERY_BATCH_SIZE: int = 350
     RELATORIO_QUERY_PARALLEL_WORKERS: int = 4
+    LOG_LEVEL: str = 'INFO'
 
     # Integração com módulo AI
     AI_INTEGRATION_ENABLED: bool = False

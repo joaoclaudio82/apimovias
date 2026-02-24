@@ -2,6 +2,11 @@ from datetime import datetime, timedelta
 from http import HTTPStatus
 from typing import TypeAlias, TypedDict, Union
 from zoneinfo import ZoneInfo
+import base64
+import hashlib
+import hmac
+import logging
+import os
 
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
@@ -16,10 +21,67 @@ from api.models import User
 from api.settings import Settings
 
 settings = Settings()
-pwd_context = PasswordHash.recommended()
+logger = logging.getLogger(__name__)
 oauth2_scheme = OAuth2PasswordBearer(
     tokenUrl='auth/token', refreshUrl='auth/refresh_token'
 )
+
+
+class PBKDF2PasswordHash:
+    """Fallback de hash de senha usando somente bibliotecas padrão."""
+
+    algorithm = 'pbkdf2_sha256'
+    iterations = 600_000
+
+    @staticmethod
+    def _to_str(value: str | bytes) -> str:
+        return value.decode('utf-8') if isinstance(value, bytes) else value
+
+    def hash(self, password: str | bytes, *, salt: bytes | None = None) -> str:
+        password_str = self._to_str(password)
+        salt_bytes = salt or os.urandom(16)
+        digest = hashlib.pbkdf2_hmac(
+            'sha256',
+            password_str.encode('utf-8'),
+            salt_bytes,
+            self.iterations,
+        )
+        salt_b64 = base64.b64encode(salt_bytes).decode('ascii')
+        digest_b64 = base64.b64encode(digest).decode('ascii')
+        return f'{self.algorithm}${self.iterations}${salt_b64}${digest_b64}'
+
+    def verify(self, password: str | bytes, hashed_password: str | bytes) -> bool:
+        password_str = self._to_str(password)
+        hashed = self._to_str(hashed_password)
+        try:
+            algorithm, iterations, salt_b64, digest_b64 = hashed.split('$', 3)
+            if algorithm != self.algorithm:
+                return False
+            salt = base64.b64decode(salt_b64.encode('ascii'))
+            expected = base64.b64decode(digest_b64.encode('ascii'))
+            computed = hashlib.pbkdf2_hmac(
+                'sha256',
+                password_str.encode('utf-8'),
+                salt,
+                int(iterations),
+            )
+            return hmac.compare_digest(computed, expected)
+        except Exception:
+            return False
+
+
+def _build_password_context():
+    try:
+        return PasswordHash.recommended()
+    except Exception as exc:
+        logger.warning(
+            "Argon2 indisponível (%s). Usando fallback PBKDF2.",
+            str(exc),
+        )
+        return PBKDF2PasswordHash()
+
+
+pwd_context = _build_password_context()
 
 
 class ServiceIdentity(TypedDict):

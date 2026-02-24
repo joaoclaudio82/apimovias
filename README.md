@@ -21,12 +21,6 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Ou via Makefile:
-
-```bash
-make up
-```
-
 Antes de subir, ajuste no `.env` as variáveis do banco externo do extractor:
 
 - `DATABASE_HOST`
@@ -60,7 +54,7 @@ Também existe sincronização manual:
 ## Comandos úteis
 
 ```bash
-make ps
-make logs
-make down
+make ai
+make extractor
+make up
 ```
