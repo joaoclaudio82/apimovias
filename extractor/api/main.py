@@ -11,3 +11,8 @@ logging.basicConfig(
 
 app = FastAPI(title='Movias: API')
 app.include_router(relatorio_router)
+
+
+@app.get('/health', tags=['health'])
+def health():
+    return {'status': 'ok'}

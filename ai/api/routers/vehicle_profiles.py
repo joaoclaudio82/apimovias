@@ -145,22 +145,3 @@ async def get_statistics(
             detail=f"Erro ao obter estatísticas: {str(e)}"
         )
 
-
-@router.get(
-    '/status',
-    status_code=HTTPStatus.OK,
-    summary='Status do serviço'
-)
-async def get_status():
-    """Status do serviço de perfis de veículos"""
-    return {
-        'status': 'ok',
-        'message': 'Serviço de perfis disponível',
-        'endpoints': [
-            '/update-csv-path',
-            '/profile/{vehicle_id}',
-            '/vehicle/{vehicle_id}/info',
-            '/statistics',
-            '/status'
-        ]
-    }

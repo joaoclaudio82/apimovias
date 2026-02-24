@@ -123,11 +123,3 @@ class AccumulatedAtStepResponse(BaseModel):
             }
         }
 
-
-class PredictionStatusResponse(BaseModel):
-    """Status do serviço de predição"""
-    status: str
-    models_loaded: int
-    predictors_cached: int
-    categories: List[str]
-    segments_per_category: dict

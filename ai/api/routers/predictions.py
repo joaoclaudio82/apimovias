@@ -12,7 +12,6 @@ from api.schemas.prediction_schemas import (
     DateToReachResponse,
     AccumulatedAtStepRequest,
     AccumulatedAtStepResponse,
-    PredictionStatusResponse
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -191,45 +190,3 @@ async def predict_accumulated_at_step(
             detail=f"Erro ao predizer: {str(e)}"
         )
 
-
-@router.get(
-    '/status',
-    response_model=PredictionStatusResponse,
-    summary='Status do serviço de predição'
-)
-async def get_prediction_status(
-    service: PredictorService = Depends(get_predictor_service)
-):
-    """
-    Status do serviço de predição
-    
-    Retorna informações sobre modelos carregados e configuração.
-    """
-    try:
-        # Estatísticas do cache
-        n_models = len(service._model_cache)
-        n_predictors = len(service._predictor_cache)
-        
-        # Categorias e segmentos configurados
-        categories = list(set(cat.category for cat in service.config.categories))
-        
-        segments_per_category = {}
-        for cat_config in service.config.categories:
-            segments_per_category[cat_config.category] = [
-                seg.segment for seg in cat_config.segments
-            ]
-        
-        return PredictionStatusResponse(
-            status='ok',
-            models_loaded=n_models,
-            predictors_cached=n_predictors,
-            categories=categories,
-            segments_per_category=segments_per_category
-        )
-        
-    except Exception as e:
-        logger.exception("Erro ao obter status de predição")
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            detail=f"Erro ao obter status: {str(e)}"
-        )
