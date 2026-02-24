@@ -1,15 +1,15 @@
+# Base Image
 FROM python:3.13-slim AS base
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
-
+# Build Stage
 FROM base AS builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
     build-essential \
   && rm -rf /var/lib/apt/lists/*
 
@@ -20,9 +20,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
   && pip install --no-cache-dir -r requirements.txt
 
-
+# Runtime Stage
 FROM base AS runtime
-
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
