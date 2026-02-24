@@ -1,6 +1,7 @@
 # api/routers/vehicle_profiles.py
 
-from fastapi import APIRouter, HTTPException, Depends
+from pathlib import Path
+from fastapi import APIRouter, HTTPException, Depends, Form
 from http import HTTPStatus
 from typing import Annotated
 import logging
@@ -9,7 +10,8 @@ from api.database import get_session
 from api.services.vehicle_profile_service import VehicleProfileService
 from api.schemas.vehicle_profile_schemas import (
     VehicleInfoResponse,
-    StatisticsResponse
+    StatisticsResponse,
+    ProfileUpdateResponse,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,10 +21,64 @@ router = APIRouter(prefix='/vehicle-profiles', tags=['vehicle-profiles'])
 
 Session = Annotated[AsyncSession, Depends(get_session)]
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DOCKER_SHARED_CSV_PATH = Path('/shared/movias.csv')
+LOCAL_SHARED_CSV_FALLBACK = PROJECT_ROOT / 'extractor' / 'data' / 'movias.csv'
 
 def get_service(session: Session) -> VehicleProfileService:
     """Dependency para obter service"""
     return VehicleProfileService(session)
+
+
+def _resolve_shared_csv_path() -> Path:
+    if DOCKER_SHARED_CSV_PATH.exists():
+        return DOCKER_SHARED_CSV_PATH
+    if LOCAL_SHARED_CSV_FALLBACK.exists():
+        return LOCAL_SHARED_CSV_FALLBACK
+    return DOCKER_SHARED_CSV_PATH
+
+
+@router.post(
+    '/update',
+    response_model=ProfileUpdateResponse,
+    summary='Atualiza perfis via CSV compartilhado'
+)
+async def update_profiles_csv(
+    service: VehicleProfileService = Depends(get_service),
+    target: str = Form(..., description="Target: 'km_dia_clean' ou 'h_dia_clean'"),
+):
+    """
+    Atualiza perfis de veículos a partir do CSV compartilhado.
+    """
+    logger.info('Atualização de perfis via CSV solicitada')
+
+    try:
+        resolved_csv = _resolve_shared_csv_path()
+        result = await service.update_from_csv_path(target=target, csv_path=str(resolved_csv))
+
+        return ProfileUpdateResponse(
+            target=target,
+            n_vehicles=result['n_vehicles'],
+            message='Atualização concluída com sucesso',
+        )
+
+    except HTTPException:
+        raise
+    except FileNotFoundError as e:
+        logger.error(f'Arquivo não encontrado: {e}')
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=f'Arquivo não encontrado: {str(e)}',
+        )
+    except ValueError as e:
+        logger.error(f'Erro de validação: {e}')
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.exception('Erro ao atualizar perfis via CSV')
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=f'Erro ao atualizar perfis: {str(e)}',
+        )
 
 
 @router.get(
@@ -103,4 +159,3 @@ async def get_statistics(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             detail=f"Erro ao obter estatísticas: {str(e)}"
         )
-

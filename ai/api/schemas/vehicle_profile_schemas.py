@@ -19,3 +19,18 @@ class StatisticsResponse(BaseModel):
     """Estatísticas agregadas por categoria"""
     status: str
     statistics: Dict[str, Dict[str, Any]]
+
+
+class ProfileImportResponse(BaseModel):
+    """Resposta da importação de perfis"""
+    target: str
+    category: str
+    n_vehicles: int
+    message: str
+
+
+class ProfileUpdateResponse(BaseModel):
+    """Resposta da atualização de perfis"""
+    target: str
+    n_vehicles: int
+    message: str

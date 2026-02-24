@@ -13,7 +13,7 @@ EXTRACTOR_API_BASE_URL = os.getenv(
     "EXTRACTOR_API_BASE_URL",
     "http://extractor:8000",
 ).rstrip("/")
-REQUEST_TIMEOUT_SECONDS = float(os.getenv("GATEWAY_TIMEOUT_SECONDS", "30"))
+REQUEST_TIMEOUT_SECONDS = None
 
 ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 HOP_BY_HOP_HEADERS = {
@@ -168,23 +168,38 @@ async def _fetch_openapi(client: httpx.AsyncClient, base_url: str) -> Dict[str, 
 
 
 async def _build_merged_openapi() -> Dict[str, Any]:
-    try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
-            ai_raw, extractor_raw = await asyncio.gather(
-                _fetch_openapi(client, AI_API_BASE_URL),
-                _fetch_openapi(client, EXTRACTOR_API_BASE_URL),
-            )
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Falha ao obter OpenAPI dos serviços internos: {exc}",
-        ) from exc
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+        ai_result, extractor_result = await asyncio.gather(
+            _fetch_openapi(client, AI_API_BASE_URL),
+            _fetch_openapi(client, EXTRACTOR_API_BASE_URL),
+            return_exceptions=True,
+        )
 
-    ai_spec = _namespace_openapi_spec(ai_raw, "ai")
-    extractor_spec = _namespace_openapi_spec(extractor_raw, "extractor")
+    upstream_errors: Dict[str, str] = {}
+    specs_to_merge: list[tuple[Dict[str, Any], str, str]] = []
+
+    if isinstance(ai_result, Exception):
+        upstream_errors["ai_api"] = str(ai_result)
+    else:
+        specs_to_merge.append((_namespace_openapi_spec(ai_result, "ai"), "/ai", "ai"))
+
+    if isinstance(extractor_result, Exception):
+        upstream_errors["extractor_api"] = str(extractor_result)
+    else:
+        specs_to_merge.append(
+            (_namespace_openapi_spec(extractor_result, "extractor"), "/extractor", "extractor")
+        )
+
+    if not specs_to_merge:
+        detail = (
+            "Falha ao obter OpenAPI dos serviços internos: "
+            f"ai={upstream_errors.get('ai_api', 'n/a')} | "
+            f"extractor={upstream_errors.get('extractor_api', 'n/a')}"
+        )
+        raise HTTPException(status_code=502, detail=detail)
 
     merged: Dict[str, Any] = {
-        "openapi": ai_spec.get("openapi", "3.1.0"),
+        "openapi": specs_to_merge[0][0].get("openapi", "3.1.0"),
         "info": {
             "title": "Movias Gateway API",
             "version": "1.0.0",
@@ -192,13 +207,13 @@ async def _build_merged_openapi() -> Dict[str, Any]:
         "servers": [{"url": "/"}],
         "paths": {},
         "components": {},
-        "tags": _merge_tags(ai_spec, extractor_spec),
+        "tags": _merge_tags(*(spec for spec, _, _ in specs_to_merge)),
     }
 
-    merged["paths"].update(_prefixed_paths(ai_spec, "/ai"))
-    merged["paths"].update(_prefixed_paths(extractor_spec, "/extractor"))
+    for spec, prefix, _ in specs_to_merge:
+        merged["paths"].update(_prefixed_paths(spec, prefix))
 
-    for spec in (ai_spec, extractor_spec):
+    for spec, _, _ in specs_to_merge:
         components = spec.get("components", {})
         if not isinstance(components, dict):
             continue
@@ -207,6 +222,9 @@ async def _build_merged_openapi() -> Dict[str, Any]:
                 continue
             merged["components"].setdefault(section_name, {})
             merged["components"][section_name].update(section_items)
+
+    if upstream_errors:
+        merged["x-upstream-errors"] = upstream_errors
 
     return merged
 

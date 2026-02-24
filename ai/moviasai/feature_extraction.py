@@ -329,8 +329,10 @@ class WeekdayFeatureExtractor(BaseFeatureExtractor):
         
         target = f'{self.metric}_dia_clean'
         
-        # Adicionar dia da semana (1=seg, 7=dom)
+        # Adicionar chaves temporais usadas no período efetivo + dia da semana.
         df_pl = df_pl.with_columns([
+            pl.col('data').dt.year().alias('ano'),
+            pl.col('data').dt.week().alias('semana'),
             pl.col('data').dt.weekday().alias('weekday')  # 0=seg, 6=dom
         ]).with_columns([
             (pl.col('weekday') + 1).alias('day')  # 1=seg, 7=dom

@@ -264,19 +264,37 @@ class VehicleProfileService:
         metric = category.value
         
         # 1. Recuperar veículos existentes
-        unique_vehicles = df['veiculo_id'].unique().tolist()
+        unique_vehicles = df['veiculo_id'].astype(int).unique().tolist()
         
         if vehicle_ids:
             unique_vehicles = [v for v in unique_vehicles if v in vehicle_ids]
-        
-        stmt = select(Vehicle).where(
-            Vehicle.id.in_(unique_vehicles),
-            Vehicle.category == category
+
+        existing_vehicles: Dict[int, Vehicle] = {}
+        vehicles_other_category: set[int] = set()
+        chunk_size = 1000
+
+        for i in range(0, len(unique_vehicles), chunk_size):
+            chunk = unique_vehicles[i:i + chunk_size]
+
+            stmt = select(Vehicle).where(
+                Vehicle.id.in_(chunk),
+                Vehicle.category == category
+            )
+            result = await self.session.execute(stmt)
+            existing_vehicles.update({v.id: v for v in result.scalars().all()})
+
+            stmt_other = select(Vehicle.id).where(
+                Vehicle.id.in_(chunk),
+                Vehicle.category != category
+            )
+            result_other = await self.session.execute(stmt_other)
+            vehicles_other_category.update(result_other.scalars().all())
+
+        logger.info(
+            "Recuperados %s veículos existentes (categoria=%s)",
+            len(existing_vehicles),
+            category.value,
         )
-        result = await self.session.execute(stmt)
-        existing_vehicles = {v.id: v for v in result.scalars().all()}
-        
-        logger.info(f"Recuperados {len(existing_vehicles)} veículos existentes")
         
         # 2. Atualizar samples e reconstruir séries
         sample_size = 364
@@ -284,43 +302,67 @@ class VehicleProfileService:
         
         updated_vehicles_data = []
         df_for_features = []
+        skipped_other_category = 0
         
-        for vehicle_id, vehicle in existing_vehicles.items():
+        for vehicle_id in unique_vehicles:
             df_vehicle = df[df['veiculo_id'] == vehicle_id].copy()
             
             if df_vehicle.empty:
                 continue
+
+            vehicle = existing_vehicles.get(vehicle_id)
+            if vehicle is None and vehicle_id in vehicles_other_category:
+                # Evita sobrescrever categoria de um veículo já existente no banco.
+                skipped_other_category += 1
+                continue
             
-            # Obter samples existentes
-            old_samples = vehicle.samples
+            # Obter samples existentes (ou bootstrap para novos veículos)
+            old_samples = vehicle.samples if vehicle is not None else []
             
             # Obter novos valores
             new_values = df_vehicle[target].dropna().tolist()
+            if not new_values and not old_samples:
+                continue
             
             # Atualizar samples (últimos sample_size valores)
             combined_samples = old_samples + new_values
             updated_samples = combined_samples[-sample_size:]
+            if not updated_samples:
+                continue
             
             # Calcular novo período efetivo
             df_vehicle_active = df_vehicle[df_vehicle[target] > 0]
             
-            if not df_vehicle_active.empty:
-                new_first_date = df_vehicle_active['data'].min()
-                new_last_date = df_vehicle_active['data'].max()
-                
-                first_date = min(vehicle.first_activity_date, new_first_date.date())
-                last_date = max(vehicle.last_activity_date, new_last_date.date())
+            if vehicle is not None:
+                if not df_vehicle_active.empty:
+                    new_first_date = df_vehicle_active['data'].min()
+                    new_last_date = df_vehicle_active['data'].max()
+
+                    first_date = min(vehicle.first_activity_date, new_first_date.date())
+                    last_date = max(vehicle.last_activity_date, new_last_date.date())
+                else:
+                    first_date = vehicle.first_activity_date
+                    last_date = vehicle.last_activity_date
+
+                segment = vehicle.segment
             else:
-                first_date = vehicle.first_activity_date
-                last_date = vehicle.last_activity_date
+                if not df_vehicle_active.empty:
+                    first_date = df_vehicle_active['data'].min().date()
+                    last_date = df_vehicle_active['data'].max().date()
+                else:
+                    first_date = df_vehicle['data'].min().date()
+                    last_date = df_vehicle['data'].max().date()
+
+                # Bootstrap de segmento quando não existe perfil prévio.
+                segment = 0
             
             # Calcular novo upper
-            new_upper = np.percentile(updated_samples, p_upper) if len(updated_samples) > 0 else vehicle.upper
+            new_upper = np.percentile(updated_samples, p_upper)
             
             updated_vehicles_data.append({
                 'id': vehicle_id,
                 'category': category,
-                'segment': vehicle.segment,
+                'segment': segment,
                 'first_activity_date': first_date,
                 'last_activity_date': last_date,
                 'upper': float(new_upper),
@@ -328,16 +370,22 @@ class VehicleProfileService:
             })
             
             # Reconstruir série para extração de features
-            date_range = pd.date_range(start=first_date, end=last_date, freq='D')
             n_samples = len(updated_samples)
             
             if n_samples > 0:
+                date_range = pd.date_range(end=last_date, periods=n_samples, freq='D')
                 df_vehicle_series = pd.DataFrame({
                     'veiculo_id': vehicle_id,
-                    'data': date_range[-n_samples:],
+                    'data': date_range,
                     target: updated_samples
                 })
                 df_for_features.append(df_vehicle_series)
+
+        if skipped_other_category:
+            logger.warning(
+                "%s veículos ignorados por já existirem em outra categoria",
+                skipped_other_category,
+            )
         
         if not df_for_features:
             logger.warning("Nenhum veículo para atualizar")
@@ -427,6 +475,37 @@ class VehicleProfileService:
         if missing:
             raise ValueError(f'Colunas faltando no CSV: {missing}')
 
+        vehicle_ids_filter: Optional[List[int]] = None
+        metric = target.split('_')[0]
+        if metric not in {'km', 'h'}:
+            raise ValueError(f"Target inválido: {target}")
+
+        if {'km_dia_clean', 'h_dia_clean'}.issubset(df.columns):
+            df_dom = pd.DataFrame({
+                'veiculo_id': pd.to_numeric(df['veiculo_id'], errors='coerce'),
+                'km_dia_clean': pd.to_numeric(df['km_dia_clean'], errors='coerce').fillna(0),
+                'h_dia_clean': pd.to_numeric(df['h_dia_clean'], errors='coerce').fillna(0),
+            }).dropna(subset=['veiculo_id'])
+            df_dom['veiculo_id'] = df_dom['veiculo_id'].astype('int64')
+
+            dominance = (
+                df_dom
+                .groupby('veiculo_id', as_index=False)[['km_dia_clean', 'h_dia_clean']]
+                .sum()
+            )
+
+            if metric == 'km':
+                filtered = dominance[dominance['km_dia_clean'] >= dominance['h_dia_clean']]
+            else:
+                filtered = dominance[dominance['h_dia_clean'] > dominance['km_dia_clean']]
+
+            vehicle_ids_filter = filtered['veiculo_id'].astype('int64').tolist()
+            logger.info(
+                'Filtro heurístico por categoria aplicado | target=%s | veículos=%s',
+                target,
+                len(vehicle_ids_filter),
+            )
+
         if 'data_br' in df.columns and df['data_br'].notna().any():
             dt = pd.to_datetime(df['data_br'], format='%d/%m/%Y', errors='coerce')
         elif 'data' in df.columns:
@@ -448,10 +527,19 @@ class VehicleProfileService:
 
         normalized_df['veiculo_id'] = normalized_df['veiculo_id'].astype('int64')
         normalized_df = normalized_df.drop_duplicates(subset=['veiculo_id', 'data'], keep='last')
+        if vehicle_ids_filter is not None:
+            normalized_df = normalized_df[normalized_df['veiculo_id'].isin(vehicle_ids_filter)]
+            if normalized_df.empty:
+                logger.warning(
+                    'Sem linhas após filtro de categoria para target=%s',
+                    target,
+                )
+                return {'target': target, 'n_vehicles': 0}
 
         return await self.update_from_dataframe(
             target=target,
             df=normalized_df[['veiculo_id', 'data', target]],
+            vehicle_ids=vehicle_ids_filter,
         )
     
     async def get_vehicle_profile(self, vehicle_id: int) -> Optional[Dict]:
