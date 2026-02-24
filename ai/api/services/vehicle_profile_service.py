@@ -475,36 +475,9 @@ class VehicleProfileService:
         if missing:
             raise ValueError(f'Colunas faltando no CSV: {missing}')
 
-        vehicle_ids_filter: Optional[List[int]] = None
         metric = target.split('_')[0]
         if metric not in {'km', 'h'}:
             raise ValueError(f"Target inválido: {target}")
-
-        if {'km_dia_clean', 'h_dia_clean'}.issubset(df.columns):
-            df_dom = pd.DataFrame({
-                'veiculo_id': pd.to_numeric(df['veiculo_id'], errors='coerce'),
-                'km_dia_clean': pd.to_numeric(df['km_dia_clean'], errors='coerce').fillna(0),
-                'h_dia_clean': pd.to_numeric(df['h_dia_clean'], errors='coerce').fillna(0),
-            }).dropna(subset=['veiculo_id'])
-            df_dom['veiculo_id'] = df_dom['veiculo_id'].astype('int64')
-
-            dominance = (
-                df_dom
-                .groupby('veiculo_id', as_index=False)[['km_dia_clean', 'h_dia_clean']]
-                .sum()
-            )
-
-            if metric == 'km':
-                filtered = dominance[dominance['km_dia_clean'] >= dominance['h_dia_clean']]
-            else:
-                filtered = dominance[dominance['h_dia_clean'] > dominance['km_dia_clean']]
-
-            vehicle_ids_filter = filtered['veiculo_id'].astype('int64').tolist()
-            logger.info(
-                'Filtro heurístico por categoria aplicado | target=%s | veículos=%s',
-                target,
-                len(vehicle_ids_filter),
-            )
 
         if 'data_br' in df.columns and df['data_br'].notna().any():
             dt = pd.to_datetime(df['data_br'], format='%d/%m/%Y', errors='coerce')
@@ -527,19 +500,10 @@ class VehicleProfileService:
 
         normalized_df['veiculo_id'] = normalized_df['veiculo_id'].astype('int64')
         normalized_df = normalized_df.drop_duplicates(subset=['veiculo_id', 'data'], keep='last')
-        if vehicle_ids_filter is not None:
-            normalized_df = normalized_df[normalized_df['veiculo_id'].isin(vehicle_ids_filter)]
-            if normalized_df.empty:
-                logger.warning(
-                    'Sem linhas após filtro de categoria para target=%s',
-                    target,
-                )
-                return {'target': target, 'n_vehicles': 0}
 
         return await self.update_from_dataframe(
             target=target,
             df=normalized_df[['veiculo_id', 'data', target]],
-            vehicle_ids=vehicle_ids_filter,
         )
     
     async def get_vehicle_profile(self, vehicle_id: int) -> Optional[Dict]:
