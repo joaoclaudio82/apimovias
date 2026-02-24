@@ -9,7 +9,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
-app = FastAPI(title='Movias: API')
+app = FastAPI(title='Movias Extractor API')
 app.include_router(relatorio_router)
 
 

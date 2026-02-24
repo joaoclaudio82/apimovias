@@ -186,12 +186,8 @@ async def _build_merged_openapi() -> Dict[str, Any]:
     merged: Dict[str, Any] = {
         "openapi": ai_spec.get("openapi", "3.1.0"),
         "info": {
-            "title": "Movias Unified Gateway API",
+            "title": "Movias Gateway API",
             "version": "1.0.0",
-            "description": (
-                "Documentação unificada do gateway. "
-                "Rotas da AI API em /ai/* e do Extractor API em /extractor/*."
-            ),
         },
         "servers": [{"url": "/"}],
         "paths": {},
@@ -217,16 +213,14 @@ async def _build_merged_openapi() -> Dict[str, Any]:
 
 @app.get("/", tags=["health"])
 async def root() -> Dict[str, str]:
-    return {
-        "message": "Movias Gateway API - Online",
-    }
+    return {'status': 'ok'}
 
 
 @app.get("/health", tags=["health"])
 async def health() -> JSONResponse:
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
         checks = await asyncio.gather(
-            client.get(f"{AI_API_BASE_URL}/"),
+            client.get(f"{AI_API_BASE_URL}/health"),
             client.get(f"{EXTRACTOR_API_BASE_URL}/health"),
             return_exceptions=True,
         )

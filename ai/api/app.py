@@ -1,7 +1,6 @@
 # api/app.py
 
 import asyncio
-from http import HTTPStatus
 from fastapi import FastAPI
 from contextlib import asynccontextmanager, suppress
 import logging
@@ -11,7 +10,6 @@ from sqlalchemy import select, func
 from api.database import engine, session_context
 from api.models import table_registry, Vehicle
 from api.routers.vehicle_profiles import router as vehicle_profiles_router
-from api.schemas import Message
 from api.config.prediction_config import PredictorConfig
 from api.services.vehicle_profile_service import VehicleProfileService
 
@@ -179,7 +177,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Movias AI API",
-    description="""API para gerenciamento de perfis de veículos e predições.""",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -188,9 +185,9 @@ app = FastAPI(
 )
 
 
-@app.get('/', status_code=HTTPStatus.OK, response_model=Message, tags=['health'])
-async def read_root():
-    return {'message': 'Movias AI API - Online'}
+@app.get('/health', tags=['health'])
+async def health():
+    return {'status': 'ok'}
 
 
 # Incluir routers

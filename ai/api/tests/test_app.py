@@ -1,8 +1,8 @@
 from http import HTTPStatus
 
 
-def test_root_hello_world(client):
-    response = client.get('/')
+def test_health(client):
+    response = client.get('/health')
 
     assert response.status_code == HTTPStatus.OK
-    assert response.json() == {'message': 'Movias AI API - Online'}
+    assert response.json() == {'status': 'ok'}

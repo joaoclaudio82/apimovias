@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, status
 from api.schemas.relatorio_request import RelatorioRequest
 from api.services.relatorio_service import RelatorioService
 
-router = APIRouter(prefix="/relatorios", tags=["Relatório"])
+router = APIRouter(prefix="/relatorios", tags=["relatorios"])
 logger = logging.getLogger(__name__)
 
 
