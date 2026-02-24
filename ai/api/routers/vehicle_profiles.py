@@ -8,8 +8,6 @@ import logging
 from api.database import get_session
 from api.services.vehicle_profile_service import VehicleProfileService
 from api.schemas.vehicle_profile_schemas import (
-    ProfileUpdateResponse,
-    ProfileUpdatePathRequest,
     VehicleInfoResponse,
     StatisticsResponse
 )
@@ -25,45 +23,6 @@ Session = Annotated[AsyncSession, Depends(get_session)]
 def get_service(session: Session) -> VehicleProfileService:
     """Dependency para obter service"""
     return VehicleProfileService(session)
-
-
-@router.post(
-    '/update-csv-path',
-    response_model=ProfileUpdateResponse,
-    summary='Atualiza perfis via caminho de CSV compartilhado'
-)
-async def update_profiles_csv_path(
-    request: ProfileUpdatePathRequest,
-    service: VehicleProfileService = Depends(get_service),
-):
-    logger.info(
-        "Atualização via caminho CSV solicitada | target=%s | path=%s",
-        request.target,
-        request.csv_path,
-    )
-
-    try:
-        result = await service.update_from_csv_path(
-            target=request.target,
-            csv_path=request.csv_path,
-        )
-        return ProfileUpdateResponse(
-            target=request.target,
-            n_vehicles=result['n_vehicles'],
-            message='Atualização concluída com sucesso',
-        )
-    except FileNotFoundError as e:
-        logger.error("Arquivo CSV não encontrado: %s", e)
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail=str(e))
-    except ValueError as e:
-        logger.error("Erro de validação no CSV: %s", e)
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        logger.exception("Erro ao atualizar perfis via CSV compartilhado")
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            detail=f"Erro ao atualizar perfis: {str(e)}"
-        )
 
 
 @router.get(

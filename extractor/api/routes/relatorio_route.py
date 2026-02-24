@@ -2,40 +2,10 @@ import logging
 import time
 from fastapi import APIRouter, HTTPException, status
 from api.schemas.relatorio_request import RelatorioRequest
-from api.services.ai_integration_service import AiIntegrationService
 from api.services.relatorio_service import RelatorioService
-from api.settings import settings
 
 router = APIRouter(prefix="/relatorios", tags=["Relatório"])
 logger = logging.getLogger(__name__)
-
-
-def _sync_ai_if_enabled() -> None:
-    if not settings.AI_INTEGRATION_ENABLED:
-        logger.info('Integração AI desabilitada (AI_INTEGRATION_ENABLED=false)')
-        return
-
-    start = time.perf_counter()
-    try:
-        result = AiIntegrationService.sync_profiles_from_csv()
-    except Exception as exc:
-        elapsed = time.perf_counter() - start
-        logger.exception(
-            'sync_ai failed | elapsed_ms=%.2f | error=%s',
-            elapsed * 1000.0,
-            str(exc),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f'Falha na sincronização com módulo AI: {exc}',
-        ) from exc
-
-    elapsed = time.perf_counter() - start
-    logger.info(
-        'sync_ai ok | elapsed_ms=%.2f | result=%s',
-        elapsed * 1000.0,
-        result,
-    )
 
 
 @router.get("/download")
@@ -65,7 +35,6 @@ def create_csv(payload: RelatorioRequest):
         )
         raise
     else:
-        _sync_ai_if_enabled()
         elapsed = time.perf_counter() - start
         logger.info(
             "create_csv ok | veiculos=%d | ids=%s | elapsed_ms=%.2f",
@@ -87,37 +56,8 @@ def create_csv_batch():
         )
         raise
     else:
-        _sync_ai_if_enabled()
         elapsed = time.perf_counter() - start
         logger.info(
             "create_csv_batch ok | mode=all_veiculos_all_dias | elapsed_ms=%.2f",
             elapsed * 1000.0,
         )
-
-
-@router.post("/sync-ai")
-def sync_ai_profiles():
-    if not settings.AI_INTEGRATION_ENABLED:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail='Integração AI está desabilitada. Ajuste AI_INTEGRATION_ENABLED=true.',
-        )
-
-    start = time.perf_counter()
-    try:
-        result = AiIntegrationService.sync_profiles_from_csv()
-    except Exception as exc:
-        elapsed = time.perf_counter() - start
-        logger.exception(
-            'sync_ai_profiles failed | elapsed_ms=%.2f | error=%s',
-            elapsed * 1000.0,
-            str(exc),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f'Falha na sincronização com módulo AI: {exc}',
-        ) from exc
-
-    elapsed = time.perf_counter() - start
-    logger.info('sync_ai_profiles ok | elapsed_ms=%.2f', elapsed * 1000.0)
-    return {'status': 'ok', **result}

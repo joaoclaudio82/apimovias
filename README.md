@@ -5,7 +5,7 @@ Stack unificado com:
 - `extractor-api` (FastAPI): gera/atualiza `extractor/data/movias.csv`.
 - `ai-api` (FastAPI): atualiza perfis e executa predição.
 - Banco do `extractor`: externo (já existente), configurado via `DATABASE_*` no `.env` da raiz.
-- Volume compartilhado do CSV: `./extractor/data` montado no `ai-api` em `/shared`.
+- Volume compartilhado do CSV: `./extractor/data` montado em `/shared` nos dois serviços no Docker.
 
 ## Subir tudo
 
@@ -37,19 +37,15 @@ Antes de subir, ajuste no `.env` as variáveis do banco externo do extractor:
 
 ## Fluxo integrado
 
-Quando `AI_INTEGRATION_ENABLED=true`:
-
 1. `POST /relatorios/` ou `POST /relatorios/batch` no `extractor-api`.
 2. O extractor atualiza o CSV local.
-3. O extractor chama o `ai-api` diretamente para sincronizar os perfis.
-4. O extractor solicita atualização de perfis nos targets:
+3. O `ai-api` monitora o CSV compartilhado automaticamente.
+4. Quando o arquivo muda, o `ai-api` sincroniza os perfis nos targets:
    - `km_dia_clean`
    - `h_dia_clean`
-5. O `ai-api` lê o arquivo compartilhado em `AI_SHARED_CSV_PATH` (padrão: `/shared/movias.csv`).
-
-Também existe sincronização manual:
-
-- `POST /relatorios/sync-ai`
+5. O `ai-api` resolve automaticamente o arquivo:
+   - Docker: `/shared/movias.csv`
+   - Local: `extractor/data/movias.csv`
 
 ## Comandos úteis
 

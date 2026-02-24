@@ -19,13 +19,6 @@ class Settings(BaseSettings):
     RELATORIO_QUERY_PARALLEL_WORKERS: int = 4
     LOG_LEVEL: str = 'INFO'
 
-    # Integração com módulo AI
-    AI_INTEGRATION_ENABLED: bool = False
-    AI_API_BASE_URL: str = 'http://localhost:8010'
-    AI_SYNC_TARGETS: str = 'km_dia_clean,h_dia_clean'
-    AI_SHARED_CSV_PATH: str = '/shared/movias.csv'
-    AI_HTTP_TIMEOUT_SECONDS: int = 180
-
     # Paths
     ROOT_PATH: Path = Path(__file__).resolve().parents[1]
     DATA_PATH: Path = ROOT_PATH / 'data'
@@ -33,6 +26,7 @@ class Settings(BaseSettings):
 
     def ensure_paths(self) -> None:
         self.DATA_PATH.mkdir(parents=True, exist_ok=True)
+        self.CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 settings = Settings()
 settings.ensure_paths()
