@@ -82,10 +82,10 @@ Este documento apresenta um guia prático para utilização do projeto ChemBERT,
 
 - Notebooks com exemplos de treinamento e otimização de hiperparâmetros estão disponíveis na pasta notebook.
 
-- A pasta `api` contém uma REST-API para executar experimentos, tanto em tempo real quanto em batch. A API implementa autenticação e gestão de cadastro de usuários (executar pelo comando `task run_api`, dentro da pasta raiz do projeto). 
+- A pasta `api` contém uma REST-API para executar experimentos, tanto em tempo real quanto em batch (executar pelo comando `task run_api`, dentro da pasta raiz do projeto). 
 
 
-- A pasta `streamlit_app` contém uma aplicação de exemplo que consome a API implementada (executar pelo comando `task run_app`, dentro da pasta `streamlit_app`). Para a aplicação funcionar, a api deverá ser inicializada primeiro. Usuário padrão: (user: admin, password: admin123)
+- A pasta `streamlit_app` contém uma aplicação de exemplo que consome a API implementada (executar pelo comando `task run_app`, dentro da pasta `streamlit_app`). Para a aplicação funcionar, a api deverá ser inicializada primeiro.
 
 - Veja o arquivo pyproject.toml, na seção [tool.taskipy.tasks], para ver como utilizar a ferramenta task para diferentes tarefas. 
 

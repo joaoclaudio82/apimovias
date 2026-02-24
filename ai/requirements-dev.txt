@@ -12,7 +12,5 @@ ignr>=2.2
 gh>=0.0.4
 jupyterlab>=4.2.2
 pytest-asyncio>=1.1.0
-factory-boy>=3.3.3
-freezegun>=1.5.5
 tensorboard>=2.20.0
 

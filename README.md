@@ -41,7 +41,7 @@ Quando `AI_INTEGRATION_ENABLED=true`:
 
 1. `POST /relatorios/` ou `POST /relatorios/batch` no `extractor-api`.
 2. O extractor atualiza o CSV local.
-3. O extractor autentica no `ai-api` com conta de serviço.
+3. O extractor chama o `ai-api` diretamente para sincronizar os perfis.
 4. O extractor solicita atualização de perfis nos targets:
    - `km_dia_clean`
    - `h_dia_clean`

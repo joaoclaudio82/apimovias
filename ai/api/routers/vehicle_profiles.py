@@ -2,12 +2,11 @@
 
 from fastapi import APIRouter, HTTPException, Depends, Form
 from http import HTTPStatus
-from typing import Annotated, Optional
+from typing import Annotated
 import pandas as pd
 import logging
 
 from api.database import get_session
-from api.security import AuthSubject, get_current_user
 from api.services.vehicle_profile_service import VehicleProfileService
 from api.schemas.vehicle_profile_schemas import (
     ProfileImportResponse,
@@ -23,7 +22,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/vehicle-profiles', tags=['vehicle-profiles'])
 
 Session = Annotated[AsyncSession, Depends(get_session)]
-CurrentAuth = Annotated[AuthSubject, Depends(get_current_user)]
 
 
 def get_service(session: Session) -> VehicleProfileService:
@@ -38,7 +36,6 @@ def get_service(session: Session) -> VehicleProfileService:
     summary='Importa perfis de arquivos'
 )
 async def import_profiles(
-    current_auth: CurrentAuth,
     service: VehicleProfileService = Depends(get_service),
     target: str = Form(..., description="Target: 'km_dia_clean' ou 'h_dia_clean'"),
     profile_dir: str = Form(..., description="Diretório com arquivos do perfil"),
@@ -52,12 +49,7 @@ async def import_profiles(
     - target: target do perfil (deve ser igual ao parâmetro target)
     - segment: número do segmento (0, 1, 2, ...)
     """
-    if isinstance(current_auth, dict) and current_auth.get('is_service'):
-        requester = f"Serviço: {current_auth['service_name']}"
-    else:
-        requester = f"Usuário: {current_auth.username}"
-    
-    logger.info(f'Importação de perfis solicitada por {requester}')
+    logger.info('Importação de perfis solicitada')
     
     try:
         # Ler arquivo de segmentação do path fornecido
@@ -116,17 +108,10 @@ async def import_profiles(
 )
 async def update_profiles_csv_path(
     request: ProfileUpdatePathRequest,
-    current_auth: CurrentAuth,
     service: VehicleProfileService = Depends(get_service),
 ):
-    if isinstance(current_auth, dict) and current_auth.get('is_service'):
-        requester = f"Serviço: {current_auth['service_name']}"
-    else:
-        requester = f"Usuário: {current_auth.username}"
-
     logger.info(
-        "Atualização via caminho CSV solicitada por %s | target=%s | path=%s",
-        requester,
+        "Atualização via caminho CSV solicitada | target=%s | path=%s",
         request.target,
         request.csv_path,
     )
@@ -161,7 +146,6 @@ async def update_profiles_csv_path(
 )
 async def get_profile(
     vehicle_id: int,
-    current_auth: CurrentAuth,
     service: VehicleProfileService = Depends(get_service)
 ):
     """
@@ -194,7 +178,6 @@ async def get_profile(
 )
 async def get_vehicle_info(
     vehicle_id: int,
-    current_auth: CurrentAuth,
     service: VehicleProfileService = Depends(get_service)
 ):
     """Busca informações básicas do veículo"""
@@ -223,7 +206,6 @@ async def get_vehicle_info(
     summary='Estatísticas do serviço'
 )
 async def get_statistics(
-    current_auth: CurrentAuth,
     service: VehicleProfileService = Depends(get_service)
 ):
     """Estatísticas agregadas por categoria"""
@@ -243,16 +225,11 @@ async def get_statistics(
     status_code=HTTPStatus.OK,
     summary='Status do serviço'
 )
-async def get_status(current_auth: CurrentAuth):
+async def get_status():
     """Status do serviço de perfis de veículos"""
-    if isinstance(current_auth, dict) and current_auth.get('is_service'):
-        requester = f"Serviço: {current_auth['service_name']}"
-    else:
-        requester = f"Usuário: {current_auth.username}"
-    
     return {
         'status': 'ok',
-        'message': f'Serviço de perfis disponível para {requester}',
+        'message': 'Serviço de perfis disponível',
         'endpoints': [
             '/import',
             '/update-csv-path',

@@ -6,16 +6,11 @@ from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 
-from api.database import engine, session_context
-from api.models import table_registry, User
-from api.routers.auth import router as auth_router
-from api.routers.users import router as users_router
+from api.database import engine
+from api.models import table_registry
 from api.routers.vehicle_profiles import router as vehicle_profiles_router
 from api.schemas import Message
-from api.schemas.user_schemas import UserType
-from api.security import get_password_hash
 from api.config.prediction_config import PredictorConfig
-from sqlalchemy import select
 
 logger = logging.getLogger("uvicorn")
 
@@ -30,24 +25,6 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(table_registry.metadata.create_all)
     logger.info("Tabelas criadas/verificadas")
-    
-    # Criar admin
-    async with session_context() as session:
-        existing_admin = await session.scalar(
-            select(User).where(User.username == "admin")
-        )
-        if not existing_admin:
-            admin = User(
-                name="Administrador do Sistema",
-                username="admin",
-                type=UserType.admin,
-                password=get_password_hash("admin123"),
-            )
-            session.add(admin)
-            await session.commit()
-            logger.info("Usuário admin criado")
-        else:
-            logger.info("Usuário admin já existe")
     
     # Carregar configuração de predição
     try:
@@ -99,8 +76,6 @@ async def read_root():
 
 
 # Incluir routers
-app.include_router(auth_router)
-app.include_router(users_router)
 app.include_router(vehicle_profiles_router)
 
 try:

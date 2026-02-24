@@ -9,9 +9,6 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${AI_DATABASE_URL:-sqlite+aiosqlite:////app/data/database.db}
-      SECRET_KEY: ${AI_SECRET_KEY:-your-secret-key}
-      ALGORITHM: ${AI_ALGORITHM:-HS256}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${AI_ACCESS_TOKEN_EXPIRE_MINUTES:-30}
     ports:
       - "${AI_API_PORT:-8010}:8010"
     volumes:
@@ -45,8 +42,6 @@ services:
       RELATORIO_QUERY_PARALLEL_WORKERS: ${RELATORIO_QUERY_PARALLEL_WORKERS:-4}
       AI_INTEGRATION_ENABLED: ${AI_INTEGRATION_ENABLED:-true}
       AI_API_BASE_URL: http://ai-api:8010
-      AI_SERVICE_CLIENT_ID: ${AI_SERVICE_CLIENT_ID:-movias}
-      AI_SERVICE_CLIENT_SECRET: ${AI_SERVICE_CLIENT_SECRET:-moviaskey}
       AI_SYNC_TARGETS: ${AI_SYNC_TARGETS:-km_dia_clean,h_dia_clean}
       AI_SHARED_CSV_PATH: ${AI_SHARED_CSV_PATH:-/shared/movias.csv}
       AI_HTTP_TIMEOUT_SECONDS: ${AI_HTTP_TIMEOUT_SECONDS:-180}

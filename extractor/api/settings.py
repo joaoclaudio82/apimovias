@@ -22,8 +22,6 @@ class Settings(BaseSettings):
     # Integração com módulo AI
     AI_INTEGRATION_ENABLED: bool = False
     AI_API_BASE_URL: str = 'http://localhost:8010'
-    AI_SERVICE_CLIENT_ID: str = 'movias'
-    AI_SERVICE_CLIENT_SECRET: str = 'moviaskey'
     AI_SYNC_TARGETS: str = 'km_dia_clean,h_dia_clean'
     AI_SHARED_CSV_PATH: str = '/shared/movias.csv'
     AI_HTTP_TIMEOUT_SECONDS: int = 180

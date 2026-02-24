@@ -5,7 +5,6 @@ from typing import Annotated, List
 import logging
 
 from api.database import get_session
-from api.security import AuthSubject, get_current_user
 from api.services.prediction_service import PredictorService
 from api.config.prediction_config import PredictorConfig
 from api.schemas.prediction_schemas import (
@@ -22,7 +21,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/predictions', tags=['predictions'])
 
 Session = Annotated[AsyncSession, Depends(get_session)]
-CurrentAuth = Annotated[AuthSubject, Depends(get_current_user)]
 
 
 # ✅ Dependency usando Request para acessar app.state
@@ -54,7 +52,6 @@ def get_predictor_service(
 )
 async def predict_date_to_reach(
     request: DateToReachRequest,
-    current_auth: CurrentAuth,
     service: PredictorService = Depends(get_predictor_service)
 ):
     """
@@ -85,13 +82,8 @@ async def predict_date_to_reach(
     }
     ```
     """
-    if isinstance(current_auth, dict) and current_auth.get('is_service'):
-        requester = f"Serviço: {current_auth['service_name']}"
-    else:
-        requester = f"Usuário: {current_auth.username}"
-    
     logger.info(
-        f'Predição date-to-reach solicitada por {requester}: '
+        'Predição date-to-reach solicitada: '
         f'{len(request.vehicle_ids)} veículos'
     )
     
@@ -127,7 +119,6 @@ async def predict_date_to_reach(
 )
 async def predict_accumulated_at_step(
     request: AccumulatedAtStepRequest,
-    current_auth: CurrentAuth,
     service: PredictorService = Depends(get_predictor_service)
 ):
     """
@@ -170,13 +161,8 @@ async def predict_accumulated_at_step(
     }
     ```
     """
-    if isinstance(current_auth, dict) and current_auth.get('is_service'):
-        requester = f"Serviço: {current_auth['service_name']}"
-    else:
-        requester = f"Usuário: {current_auth.username}"
-    
     logger.info(
-        f'Predição accumulated-at-step solicitada por {requester}: '
+        'Predição accumulated-at-step solicitada: '
         f'{len(request.vehicle_ids)} veículos'
     )
     
@@ -212,7 +198,6 @@ async def predict_accumulated_at_step(
     summary='Status do serviço de predição'
 )
 async def get_prediction_status(
-    current_auth: CurrentAuth,
     service: PredictorService = Depends(get_predictor_service)
 ):
     """
