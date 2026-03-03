@@ -5,7 +5,7 @@
 # ============================================================
 
 # Diretório raiz onde estão os modelos treinados
-models_root_dir: "./models"
+models_root_dir: "../models/ts"
 
 # Parâmetros globais de predição (aplicados a todos os modelos)
 history_size: 28          # Tamanho do histórico (dias)

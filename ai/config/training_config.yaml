@@ -1,0 +1,53 @@
+# ============================================================
+# CONFIGURAÇÃO DE TREINAMENTO DE MODELOS
+# ============================================================
+
+# Diretórios
+windows_dir: "../datasets/windows"
+profile_dir: "../datasets/profile"
+work_dir: "../models/output"
+cache_dir: "./datasets/.cache"
+
+# Seed para reprodutibilidade
+seed: 13
+
+# Métrica de avaliação
+eval_metric: "wmape"
+
+# Configuração de treinamento
+training:
+  # Modelos a treinar
+  models:
+    # Modelos PyTorch
+    pytorch:
+      enabled: true
+      models:
+        - DLinear
+        - NLinear
+        - TSMixerModel
+        - TCN
+        - NBEATS
+        - NHiTS
+      
+      # Configurações específicas PyTorch
+      likelihood: false
+      incremental: false
+      force_reset: true
+      load_best: true
+      n_epochs: 100
+      batch_size: 64
+    
+    # Modelos Globais (não-PyTorch)
+    global:
+      enabled: true
+      models:
+        - LightGBM
+        - XGBoost
+        - LinearRegression
+      
+      # Configurações específicas Global
+      stride: 7
+# Configurações gerais
+  verbose_training: true
+  save_models: true
+  save_results: true

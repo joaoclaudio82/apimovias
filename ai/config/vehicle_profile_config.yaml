@@ -1,0 +1,35 @@
+# config/vehicle_profile_config.yaml
+
+# ============================================================
+# CONFIGURAÇÃO DE PERFIS DE VEÍCULOS
+# ============================================================
+
+# Path do arquivo de importação de dados
+input_data: "../datasets/full/telemetria_movias2025_features.csv"
+
+# Parâmetros de geração de perfis
+profile:
+  sample_size: 364  # Tamanho do histórico de amostras
+  p_upper: 99       # Percentil para upper bound
+  n_jobs: 4         # Paralelização (n_jobs threads)
+
+# Parâmetros de classificação
+classification:
+  # Modelos de classificação
+  models:
+    stage1_type: "../models/classification/stage1/stage1_type_BEST.pkl"
+    stage2_displacement: "../models/classification/stage2/stage2_displacement_BEST.pkl"
+    stage2_machine: "../models/classification/stage2/stage2_machine_BEST.pkl"
+  
+  # Requisitos mínimos
+  min_days: 35  # tamanho mínimo de dias do perfil
+
+# Mapeamento de classes
+mapping:
+  category:
+    0: "h"
+    1: "km"
+  
+  segments:
+    km: 3
+    h: 3

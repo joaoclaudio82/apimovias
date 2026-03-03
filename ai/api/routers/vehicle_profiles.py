@@ -1,18 +1,25 @@
 # api/routers/vehicle_profiles.py
 
-from pathlib import Path
-from fastapi import APIRouter, HTTPException, Depends, Form
+from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import StreamingResponse
+
 from http import HTTPStatus
 from typing import Annotated
+import pandas as pd
+import io
 import logging
 
 from api.database import get_session
 from api.services.vehicle_profile_service import VehicleProfileService
 from api.schemas.vehicle_profile_schemas import (
+    ImportFromFileResponse,
+    ImportFromFileRequest,
     VehicleInfoResponse,
     StatisticsResponse,
-    ProfileUpdateResponse,
 )
+
+from api.config.vehicle_profile_config import VehicleProfileConfig
+from api.config.data_ingestion_config import DataIngestionConfig
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -21,64 +28,36 @@ router = APIRouter(prefix='/vehicle-profiles', tags=['vehicle-profiles'])
 
 Session = Annotated[AsyncSession, Depends(get_session)]
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DOCKER_SHARED_CSV_PATH = Path('/shared/movias.csv')
-LOCAL_SHARED_CSV_FALLBACK = PROJECT_ROOT / 'extractor' / 'data' / 'movias.csv'
 
-def get_service(session: Session) -> VehicleProfileService:
+def get_vehicle_profile_config(request: Request) -> VehicleProfileConfig:
+    """Dependency para obter configuração de perfis"""
+    config = request.app.state.vehicle_profile_config
+    if config is None:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="Configuração de perfis não disponível"
+        )
+    return config
+
+
+def get_data_ingestion_config(request: Request) -> DataIngestionConfig:
+    """Dependency para obter configuração de ingestão"""
+    config = request.app.state.data_ingestion_config
+    if config is None:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="Configuração de ingestão não disponível"
+        )
+    return config
+
+
+def get_service(
+    session: Session,
+    profile_config: VehicleProfileConfig = Depends(get_vehicle_profile_config),
+    ingestion_config: DataIngestionConfig = Depends(get_data_ingestion_config)
+) -> VehicleProfileService:
     """Dependency para obter service"""
-    return VehicleProfileService(session)
-
-
-def _resolve_shared_csv_path() -> Path:
-    if DOCKER_SHARED_CSV_PATH.exists():
-        return DOCKER_SHARED_CSV_PATH
-    if LOCAL_SHARED_CSV_FALLBACK.exists():
-        return LOCAL_SHARED_CSV_FALLBACK
-    return DOCKER_SHARED_CSV_PATH
-
-
-@router.post(
-    '/update',
-    response_model=ProfileUpdateResponse,
-    summary='Atualiza perfis via CSV compartilhado'
-)
-async def update_profiles_csv(
-    service: VehicleProfileService = Depends(get_service),
-    target: str = Form(..., description="Target: 'km_dia_clean' ou 'h_dia_clean'"),
-):
-    """
-    Atualiza perfis de veículos a partir do CSV compartilhado.
-    """
-    logger.info('Atualização de perfis via CSV solicitada')
-
-    try:
-        resolved_csv = _resolve_shared_csv_path()
-        result = await service.update_from_csv_path(target=target, csv_path=str(resolved_csv))
-
-        return ProfileUpdateResponse(
-            target=target,
-            n_vehicles=result['n_vehicles'],
-            message='Atualização concluída com sucesso',
-        )
-
-    except HTTPException:
-        raise
-    except FileNotFoundError as e:
-        logger.error(f'Arquivo não encontrado: {e}')
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND,
-            detail=f'Arquivo não encontrado: {str(e)}',
-        )
-    except ValueError as e:
-        logger.error(f'Erro de validação: {e}')
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        logger.exception('Erro ao atualizar perfis via CSV')
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            detail=f'Erro ao atualizar perfis: {str(e)}',
-        )
+    return VehicleProfileService(session, profile_config, ingestion_config)
 
 
 @router.get(
@@ -91,7 +70,6 @@ async def get_profile(
 ):
     """
     Busca perfil completo de um veículo
-    
     Retorna todas as features calculadas (85 features + metadata).
     """
     try:
@@ -158,4 +136,147 @@ async def get_statistics(
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             detail=f"Erro ao obter estatísticas: {str(e)}"
+        )
+
+
+@router.get(
+    '/status',
+    status_code=HTTPStatus.OK,
+    summary='Status do serviço'
+)
+async def get_status():
+    """Status do serviço de perfis de veículos"""
+    return {
+        'status': 'ok',
+        'message': 'Serviço de perfis disponível',
+        'endpoints': [
+            '/import',
+            '/update-csv',
+            '/profile/{vehicle_id}',
+            '/vehicle/{vehicle_id}/info',
+            '/statistics',
+            '/status'
+        ]
+    }
+
+
+@router.get(
+    '/vehicles/category',
+    summary='Lista todos os veículos com category e segment'
+)
+async def get_all_vehicles_category(
+    service: VehicleProfileService = Depends(get_service),
+    format: str = 'json'
+):
+    """
+    Retorna todos os veículos com category e segment
+    Query Parameters:
+    - format: 'json' (padrão) ou 'csv'
+    Retorna DataFrame com colunas: veiculo_id, category, segment
+    """
+    try:
+        df = await service.get_all_vehicles_category()
+        if format == 'csv':
+            stream = io.StringIO()
+            df.to_csv(stream, index=False)
+            return StreamingResponse(
+                iter([stream.getvalue()]),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": "attachment; filename=vehicles_category_segment.csv"
+                }
+            )
+        else:
+            return df.to_dict(orient='records')
+    except Exception as e:
+        logger.exception("Erro ao listar veículos")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao listar veículos: {str(e)}"
+        )
+
+
+@router.get(
+    '/vehicles/category/{category}',
+    summary='Lista veículos de uma categoria'
+)
+async def get_vehicles_by_category(
+    category: str,
+    service: VehicleProfileService = Depends(get_service)
+):
+    """
+    Lista veículos de uma categoria específica
+    Path Parameters:
+    - category: 'km' ou 'h'
+    Retorna DataFrame com colunas: veiculo_id, category, segment
+    """
+    try:
+        df = await service.get_vehicles_by_category(category)
+        return df.to_dict(orient='records')
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Erro ao listar veículos da categoria {category}")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao listar veículos: {str(e)}"
+        )
+
+
+@router.get(
+    '/vehicles/category/{category}/segment/{segment}',
+    summary='Lista veículos de uma categoria e segmento'
+)
+async def get_vehicles_by_segment(
+    category: str,
+    segment: int,
+    service: VehicleProfileService = Depends(get_service)
+):
+    """
+    Lista veículos de uma categoria e segmento específicos
+  Path Parameters:
+    - category: 'km' ou 'h'
+    - segment: número do segmento (0, 1, 2, ...)
+  Retorna DataFrame com colunas: veiculo_id, category, segment
+    """
+    try:
+        df = await service.get_vehicles_by_segment(category, segment)
+        return df.to_dict(orient='records')
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Erro ao listar veículos {category} segmento {segment}")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao listar veículos: {str(e)}"
+        )
+
+
+@router.post('/import', response_model=ImportFromFileResponse)
+async def import_from_file(
+    request: ImportFromFileRequest,
+    service: VehicleProfileService = Depends(get_service)
+):
+    """
+    Importa e atualiza perfis de arquivo externo
+  Pipeline completo unificado:
+    1. Carrega arquivo
+    2. Separa existentes/novos
+    3. Atualiza existentes (concatena com samples)
+    4. Classifica novos
+    5. Reclassifica segments
+    6. Extrai features
+    7. Salva no banco
+    """
+    try:
+        result = await service.import_from_file(
+            file_path=request.file_path,
+            vehicle_ids=request.vehicle_ids
+        )
+        return ImportFromFileResponse(status='success', **result)
+    except Exception as e:
+        logger.exception("Erro ao importar perfis")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=str(e)
         )

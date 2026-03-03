@@ -1,4 +1,5 @@
 # api/routers/predictions.py
+
 from fastapi import APIRouter, HTTPException, Depends, Request
 from http import HTTPStatus
 from typing import Annotated, List
@@ -6,14 +7,19 @@ import logging
 
 from api.database import get_session
 from api.services.prediction_service import PredictorService
+from api.services.vehicle_profile_service import VehicleProfileService
 from api.config.prediction_config import PredictorConfig
+from api.config.data_ingestion_config import DataIngestionConfig
+from api.config.vehicle_profile_config import VehicleProfileConfig
 from api.schemas.prediction_schemas import (
     DateToReachRequest,
     DateToReachResponse,
     AccumulatedAtStepRequest,
     AccumulatedAtStepResponse,
+    PredictionStatusResponse
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+
 
 logger = logging.getLogger(__name__)
 
@@ -22,26 +28,55 @@ router = APIRouter(prefix='/predictions', tags=['predictions'])
 Session = Annotated[AsyncSession, Depends(get_session)]
 
 
-# ✅ Dependency usando Request para acessar app.state
 def get_predictor_config(request: Request) -> PredictorConfig:
     """Dependency para obter configuração de predição"""
     config = request.app.state.predictor_config
-    
     if config is None:
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             detail="Configuração de predição não disponível"
         )
-    
     return config
+
+
+def get_vehicle_profile_config(request: Request) -> VehicleProfileConfig:
+    """Dependency para obter configuração de perfis"""
+    config = request.app.state.vehicle_profile_config
+    if config is None:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="Configuração de perfis não disponível"
+        )
+    return config
+
+
+def get_data_ingestion_config(request: Request) -> DataIngestionConfig:
+    """Dependency para obter configuração de ingestão"""
+    config = request.app.state.data_ingestion_config
+    if config is None:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="Configuração de ingestão não disponível"
+        )
+    return config
+
+
+def get_vehicle_profile_service(
+    session: Session,
+    profile_config: VehicleProfileConfig = Depends(get_vehicle_profile_config),
+    ingestion_config: DataIngestionConfig = Depends(get_data_ingestion_config)
+) -> VehicleProfileService:
+    """Dependency para obter VehicleProfileService"""
+    return VehicleProfileService(session, profile_config, ingestion_config)
 
 
 def get_predictor_service(
     session: Session,
-    config: PredictorConfig = Depends(get_predictor_config)
+    config: PredictorConfig = Depends(get_predictor_config),
+    profile_service: VehicleProfileService = Depends(get_vehicle_profile_service)
 ) -> PredictorService:
-    """Dependency para obter service"""
-    return PredictorService(session, config)
+    """Dependency para obter PredictorService"""
+    return PredictorService(session, config, profile_service)
 
 
 @router.post(
@@ -55,14 +90,10 @@ async def predict_date_to_reach(
 ):
     """
     Encontra a data em que o valor acumulado DAS PREDIÇÕES ultrapassa o alvo
-    
     O acumulado é calculado APENAS sobre as predições futuras, começando do zero.
     Não inclui o valor acumulado do histórico.
-    
     **Exemplo de uso:**
-    
     "Quando o veículo 1316 vai acumular 10.000 km a partir de hoje?"
-    
     ```json
     {
       "vehicle_ids": [1316],
@@ -70,9 +101,7 @@ async def predict_date_to_reach(
       "n_jobs": 1
     }
     ```
-    
-    **Batch com paralelização:**
-    
+     **Batch com paralelização:**
     ```json
     {
       "vehicle_ids": [1316, 18230, 10495],
@@ -82,21 +111,17 @@ async def predict_date_to_reach(
     ```
     """
     logger.info(
-        'Predição date-to-reach solicitada: '
+        f'Predição date-to-reach solicitada: '
         f'{len(request.vehicle_ids)} veículos'
     )
-    
     try:
         results = await service.predict_date_to_reach(
             vehicle_ids=request.vehicle_ids,
             target_values=request.target_values,
             n_jobs=request.n_jobs
         )
-        
         logger.info(f'Predições concluídas: {len(results)} resultados')
-        
         return results
-        
     except ValueError as e:
         logger.error(f"Erro de validação: {e}")
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
@@ -122,37 +147,28 @@ async def predict_accumulated_at_step(
 ):
     """
     Prediz o valor acumulado DAS PREDIÇÕES em uma data de referência ou após n_steps
-    
-    O acumulado é calculado APENAS sobre as predições futuras, começando do zero.
+  O acumulado é calculado APENAS sobre as predições futuras, começando do zero.
     Não inclui o valor acumulado do histórico.
-    
-    **Exemplo 1: Usar n_steps**
-    
-    "Quanto o veículo 1316 vai acumular nos próximos 90 dias?"
-    
-    ```json
+  **Exemplo 1: Usar n_steps**
+  "Quanto o veículo 1316 vai acumular nos próximos 90 dias?"
+  ```json
     {
       "vehicle_ids": [1316],
       "n_steps": [90],
       "n_jobs": 1
     }
     ```
-    
-    **Exemplo 2: Usar reference_dates**
-    
-    "Quanto o veículo vai acumular até 31/12/2024?"
-    
-    ```json
+  **Exemplo 2: Usar reference_dates**
+  "Quanto o veículo vai acumular até 31/12/2024?"
+  ```json
     {
       "vehicle_ids": [1316],
       "reference_dates": ["2024-12-31"],
       "n_jobs": 1
     }
     ```
-    
-    **Exemplo 3: Batch com paralelização**
-    
-    ```json
+  **Exemplo 3: Batch com paralelização**
+  ```json
     {
       "vehicle_ids": [1316, 18230, 10495],
       "n_steps": [90, 120, 60],
@@ -161,10 +177,9 @@ async def predict_accumulated_at_step(
     ```
     """
     logger.info(
-        'Predição accumulated-at-step solicitada: '
+        f'Predição accumulated-at-step solicitada: '
         f'{len(request.vehicle_ids)} veículos'
     )
-    
     try:
         results = await service.predict_accumulated_at_step(
             vehicle_ids=request.vehicle_ids,
@@ -172,11 +187,8 @@ async def predict_accumulated_at_step(
             reference_dates=request.reference_dates,
             n_jobs=request.n_jobs
         )
-        
         logger.info(f'Predições concluídas: {len(results)} resultados')
-        
         return results
-        
     except ValueError as e:
         logger.error(f"Erro de validação: {e}")
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
@@ -190,3 +202,40 @@ async def predict_accumulated_at_step(
             detail=f"Erro ao predizer: {str(e)}"
         )
 
+
+@router.get(
+    '/status',
+    response_model=PredictionStatusResponse,
+    summary='Status do serviço de predição'
+)
+async def get_prediction_status(
+    service: PredictorService = Depends(get_predictor_service)
+):
+    """
+    Status do serviço de predição
+  Retorna informações sobre modelos carregados e configuração.
+    """
+    try:
+        # Estatísticas do cache
+        n_models = len(service._model_cache)
+        n_predictors = len(service._predictor_cache)
+      # Categorias e segmentos configurados
+        categories = list(set(cat.category for cat in service.config.categories))
+        segments_per_category = {}
+        for cat_config in service.config.categories:
+            segments_per_category[cat_config.category] = [
+                seg.segment for seg in cat_config.segments
+            ]
+        return PredictionStatusResponse(
+            status='ok',
+            models_loaded=n_models,
+            predictors_cached=n_predictors,
+            categories=categories,
+            segments_per_category=segments_per_category
+        )
+    except Exception as e:
+        logger.exception("Erro ao obter status de predição")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao obter status: {str(e)}"
+        )

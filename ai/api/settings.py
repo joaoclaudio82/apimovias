@@ -8,4 +8,4 @@ class Settings(BaseSettings):
         extra='ignore',
     )
 
-    DATABASE_URL: str
+    AI_DATABASE_URL_LOCAL: str

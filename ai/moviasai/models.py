@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 class LinearTrendForecaster:
     """
-    Modelo baseline de regressão linear - VERSÃO ULTRA OTIMIZADA
+    Modelo baseline de regressão linear 
     
     Ajusta regressão linear (y = ax + b) para cada série temporal usando
     fórmula fechada vetorizada (sem sklearn, sem paralelização).
@@ -203,7 +203,7 @@ class LinearTrendForecaster:
         return_darts: bool = True
     ) -> Union[List[TimeSeries], List[np.ndarray]]:
         """
-        Prediz n passos à frente - VERSÃO ULTRA OTIMIZADA
+        Prediz n passos à frente 
         
         Parameters:
         -----------

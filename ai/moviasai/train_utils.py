@@ -18,11 +18,12 @@ from darts.models import (
     XGBModel
 )
 
-from dataset_loader import DatasetLoader
-from vehicle_profile import VehicleProfile
+from moviasai.dataset_loader import DatasetLoader
+from moviasai.vehicle_profile import VehicleProfile
 
-from covariates import MovingAvg, default_encoders
-from train import TrainPipeline, ModelBuilder, TrainerOptionsBuilder
+from moviasai.covariates import default_encoders
+from moviasai.train import TrainPipeline, ModelBuilder, TrainerOptionsBuilder
+
 from darts.metrics import wmape
 from darts.utils.likelihood_models import QuantileRegression
 

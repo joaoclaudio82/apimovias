@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import Union, Optional, Dict, List, Tuple
 from datetime import datetime, timedelta
 import warnings
-from joblib import Parallel, delayed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-
+import time
 
 class VehicleProfile:
     """
@@ -27,7 +27,8 @@ class VehicleProfile:
         target: str,
         sample_size: int = 364,
         p_upper: int = 99,
-        n_jobs: int = -1
+        n_jobs: int = 4,
+        batch_size: int = 10
     ):
         """
         Inicializa o perfil de veículos
@@ -41,13 +42,16 @@ class VehicleProfile:
         p_upper : int, optional
             Percentil superior para clipping (padrão: 99)
         n_jobs : int, optional
-            Número de processos paralelos. -1 usa todos os cores (padrão: -1)
+            Número de threads paralelas (padrão: 4)
+        batch_size : int, optional
+            Tamanho do lote para processamento (padrão: 10)
         """
         self.target = target
         self.metric = target.split('_')[0]
         self.sample_size = sample_size
         self.p_upper = p_upper
         self.n_jobs = n_jobs
+        self.batch_size = batch_size
         
         self.df_versions: Optional[pd.DataFrame] = None
         self.df_effective_period: Optional[pd.DataFrame] = None
@@ -77,17 +81,19 @@ class VehicleProfile:
         
         self.scaler_columns = ['upper']
     
-    def _get_week_end_date(self, date: Union[str, datetime]) -> datetime:
+    @staticmethod
+    def _get_week_end_date(date: Union[str, datetime]) -> datetime:
         """Retorna domingo"""
         if isinstance(date, str):
             date = pd.to_datetime(date, format='%d/%m/%Y')
         days_to_sunday = 6 - date.weekday()
         return date + timedelta(days=days_to_sunday)
     
-    def _get_effective_period(self, df: pl.DataFrame) -> pl.DataFrame:
+    @staticmethod
+    def _get_effective_period(df: pl.DataFrame, target: str) -> pl.DataFrame:
         """Calcula período efetivo"""
         return (
-            df.filter(pl.col(self.target) > 0)
+            df.filter(pl.col(target) > 0)
             .with_columns([
                 pl.col('data').dt.year().alias('ano'),
                 pl.col('data').dt.week().alias('semana')
@@ -106,13 +112,15 @@ class VehicleProfile:
             .select(['veiculo_id', 'dt_inicio', 'dt_fim'])
         )
     
+    @staticmethod
     def _extract_segmentation_features(
-        self,
         df: pl.DataFrame,
-        up_to_date: datetime
+        up_to_date: datetime,
+        target: str,
+        metric: str,
+        segmentation_features: List[str]
     ) -> pd.DataFrame:
         """Extrai features de segmentação"""
-        target = self.target
         df = df.filter(pl.col('data') <= up_to_date)
         
         df_pl = df.with_columns([
@@ -120,7 +128,7 @@ class VehicleProfile:
             pl.col('data').dt.week().alias('semana')
         ])
         
-        periodo = self._get_effective_period(df_pl)
+        periodo = VehicleProfile._get_effective_period(df_pl, target)
         df_pl = df_pl.join(periodo, on='veiculo_id', how='left')
         
         df_pl = df_pl.with_columns([
@@ -162,7 +170,7 @@ class VehicleProfile:
         features = agg.join(gaps, on='veiculo_id', how='left').fill_null(0)
         df_final = features.to_pandas()
         
-        m = self.metric
+        m = metric
         df_final[f'{m}_por_dia'] = np.where(df_final['total_dias'] > 0, df_final['total'] / df_final['total_dias'], 0)
         df_final[f'media_{m}'] = df_final['media']
         df_final[f'max_{m}'] = df_final['max']
@@ -181,15 +189,16 @@ class VehicleProfile:
         
         df_final = df_final.replace([np.inf, -np.inf], 999999).fillna(0)
         
-        return df_final[['veiculo_id'] + self.segmentation_features]
+        return df_final[['veiculo_id'] + segmentation_features]
     
+    @staticmethod
     def _extract_weekday_features(
-        self,
         df: pl.DataFrame,
-        up_to_date: datetime
+        up_to_date: datetime,
+        target: str,
+        weekday_base_features: List[str]
     ) -> pd.DataFrame:
         """Extrai features por dia da semana"""
-        target = self.target
         df = df.filter(pl.col('data') <= up_to_date)
         
         df_wd = df.with_columns([
@@ -219,14 +228,14 @@ class VehicleProfile:
         df_wide = df_agg.pivot(
             index='veiculo_id',
             columns='weekday',
-            values=self.weekday_base_features
+            values=weekday_base_features
         )
         
         df_wide.columns = [f'day_{int(day)}_{feat}' for feat, day in df_wide.columns]
         df_wide = df_wide.reset_index()
         
         for day in range(1, 8):
-            for feat in self.weekday_base_features:
+            for feat in weekday_base_features:
                 col = f'day_{day}_{feat}'
                 if col not in df_wide.columns:
                     df_wide[col] = 0.0
@@ -241,11 +250,9 @@ class VehicleProfile:
         target: str,
         p_upper: int,
         sample_size: int,
+        metric: str,
         segmentation_features: List[str],
-        weekday_columns: List[str],
-        extract_seg_fn,
-        extract_wd_fn,
-        get_period_fn
+        weekday_base_features: List[str]
     ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[int, Tuple[float, List[float]]]]:
         """Processa uma semana em paralelo"""
         df_week = df_pl.with_columns([
@@ -259,9 +266,13 @@ class VehicleProfile:
         week_end = df_week['data'].max()
         df_cumulative = df_pl.filter(pl.col('data') <= week_end)
         
-        df_seg = extract_seg_fn(df_cumulative, week_end)
-        df_wd = extract_wd_fn(df_cumulative, week_end)
-        df_period = get_period_fn(df_cumulative).to_pandas()
+        df_seg = VehicleProfile._extract_segmentation_features(
+            df_cumulative, week_end, target, metric, segmentation_features
+        )
+        df_wd = VehicleProfile._extract_weekday_features(
+            df_cumulative, week_end, target, weekday_base_features
+        )
+        df_period = VehicleProfile._get_effective_period(df_cumulative, target).to_pandas()
         
         df_combined = df_seg.merge(df_wd, on='veiculo_id', how='inner')
         df_combined['year'] = year
@@ -283,7 +294,7 @@ class VehicleProfile:
         return df_combined, df_period, scaler_data
     
     def fit(self, df: Union[pl.DataFrame, pd.DataFrame], verbose: bool = True):
-        """Ajusta perfis com paralelização"""
+        """Ajusta perfis com paralelização otimizada"""
         if isinstance(df, pd.DataFrame):
             df_pl = pl.from_pandas(df)
         else:
@@ -296,12 +307,13 @@ class VehicleProfile:
         
         if verbose:
             print(f"\n{'='*80}")
-            print(f"AJUSTANDO PERFIS - MODO PARALELO ({self.metric.upper()})")
+            print(f"AJUSTANDO PERFIS ({self.metric.upper()})")
             print(f"{'='*80}")
             print(f"Target: {self.target}")
             print(f"Veículos: {df_pl['veiculo_id'].n_unique()}")
             print(f"Período: {df_pl['data'].min()} a {df_pl['data'].max()}")
-            print(f"Processos: {self.n_jobs if self.n_jobs > 0 else 'todos'}")
+            print(f"Threads: {self.n_jobs}")
+            print(f"Batch size: {self.batch_size}")
             print()
         
         df_with_week = df_pl.with_columns([
@@ -318,30 +330,43 @@ class VehicleProfile:
         
         if verbose:
             print(f"📅 Total de semanas: {len(all_weeks)}")
-            print("🔄 Processando em paralelo...")
+            print("🔄 Processando em lotes paralelos...")
         
-        import time
         start_time = time.time()
+        results = []
         
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(self._process_week_version)(
-                int(row['year']),
-                int(row['week']),
-                df_pl,
-                self.target,
-                self.p_upper,
-                self.sample_size,
-                self.segmentation_features,
-                self.weekday_columns,
-                self._extract_segmentation_features,
-                self._extract_weekday_features,
-                self._get_effective_period
-            )
-            for _, row in tqdm(all_weeks.iterrows(), total=len(all_weeks), desc="Semanas", disable=not verbose)
-        )
+        # Processar em lotes
+        n_batches = (len(all_weeks) + self.batch_size - 1) // self.batch_size
         
-        valid_results = [(v, p, s) for v, p, s in results if v is not None]
+        for batch_idx in range(n_batches):
+            start_idx = batch_idx * self.batch_size
+            end_idx = min(start_idx + self.batch_size, len(all_weeks))
+            batch = all_weeks.iloc[start_idx:end_idx]
+            
+            with ThreadPoolExecutor(max_workers=self.n_jobs) as executor:
+                futures = [
+                    executor.submit(
+                        VehicleProfile._process_week_version,
+                        int(row['year']),
+                        int(row['week']),
+                        df_pl,
+                        self.target,
+                        self.p_upper,
+                        self.sample_size,
+                        self.metric,
+                        self.segmentation_features,
+                        self.weekday_base_features
+                    )
+                    for _, row in batch.iterrows()
+                ]
+                
+                desc = f"Batch {batch_idx+1}/{n_batches}" if verbose else None
+                for f in tqdm(as_completed(futures), total=len(futures), desc=desc, disable=not verbose):
+                    res = f.result()
+                    if res[0] is not None:
+                        results.append(res)
         
+        valid_results = results
         all_versions = [r[0] for r in valid_results]
         all_periods = [r[1] for r in valid_results]
         
@@ -428,24 +453,7 @@ class VehicleProfile:
         dates: List[Union[str, datetime]],
         normalized: bool = False
     ) -> Dict[Tuple[int, datetime], pd.Series]:
-        """
-        Busca perfis para múltiplas combinações (veículo, data) em BATCH
-        
-        Parameters:
-        -----------
-        vehicle_ids : List[int]
-            Lista de IDs de veículos
-        dates : List[datetime]
-            Lista de datas
-        normalized : bool, optional
-            Se True, normaliza features
-        
-        Returns:
-        --------
-        dict
-            {(vehicle_id, date): profile_row}
-        """
-        # Converter datas
+        """Busca perfis para múltiplas combinações (veículo, data) em BATCH"""
         dates_dt = []
         for date in dates:
             if isinstance(date, str):
@@ -453,7 +461,6 @@ class VehicleProfile:
             else:
                 dates_dt.append(date)
         
-        # Mapear (date -> year, week)
         date_to_week = {}
         for date in dates_dt:
             week_end = self._get_week_end_date(date)
@@ -461,10 +468,8 @@ class VehicleProfile:
             week = week_end.isocalendar()[1]
             date_to_week[date] = (year, week)
         
-        # Obter semanas únicas
         unique_weeks = list(set(date_to_week.values()))
         
-        # Filtrar df_versions para semanas e veículos necessários
         year_week_filters = []
         for year, week in unique_weeks:
             year_week_filters.append(
@@ -484,14 +489,12 @@ class VehicleProfile:
         else:
             df_filtered = pd.DataFrame()
         
-        # Criar cache
         profiles_cache = {}
         
         for date in dates_dt:
             target_year, target_week = date_to_week[date]
             
             for vid in vehicle_ids:
-                # Buscar versão exata
                 exact = df_filtered[
                     (df_filtered['veiculo_id'] == vid) &
                     (df_filtered['year'] == target_year) &
@@ -501,7 +504,6 @@ class VehicleProfile:
                 if len(exact) > 0:
                     row = exact.iloc[0].copy()
                 else:
-                    # Buscar última anterior
                     prior = df_filtered[
                         (df_filtered['veiculo_id'] == vid) &
                         (
@@ -515,7 +517,6 @@ class VehicleProfile:
                     else:
                         continue
                 
-                # Normalizar se necessário
                 if normalized:
                     upper = row['upper']
                     for feat in self.segmentation_features:
@@ -665,6 +666,7 @@ class VehicleProfile:
             f"  target='{self.target}',\n"
             f"  n_vehicles={n_vehicles},\n"
             f"  n_versions={n_versions},\n"
-            f"  n_jobs={self.n_jobs}\n"
+            f"  n_jobs={self.n_jobs},\n"
+            f"  batch_size={self.batch_size}\n"
             f")"
         )

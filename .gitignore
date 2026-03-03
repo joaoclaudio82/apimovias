@@ -27,6 +27,7 @@ env/
 # Runtime and generated data
 extractor/data/movias.csv
 ai/database.db
+datasets/
 ai/*.db
 ai/*.db-*
 *.log

@@ -10,10 +10,10 @@ from api.settings import Settings
 settings = Settings()
 
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    settings.AI_DATABASE_URL_LOCAL,
     echo=True,
     connect_args={'check_same_thread': False}
-    if 'sqlite' in settings.DATABASE_URL
+    if 'sqlite' in settings.AI_DATABASE_URL_LOCAL
     else {},
 )
 

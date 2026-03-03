@@ -22,7 +22,6 @@ from darts.models import (
     LinearRegressionModel
 )
 
-from api.models import Vehicle, VehicleCategory
 from api.services.vehicle_profile_service import VehicleProfileService
 from api.config.prediction_config import PredictorConfig
 from moviasai.prediction import Predictor
@@ -72,11 +71,12 @@ class PredictorService:
     def __init__(
         self,
         session: AsyncSession,
-        config: PredictorConfig
+        config: PredictorConfig,
+        profile_service: VehicleProfileService
     ):
         self.session = session
         self.config = config
-        self.profile_service = VehicleProfileService(session)
+        self.profile_service = profile_service
         
         # Cache de modelos carregados
         # Key: (category, segment, model_name)

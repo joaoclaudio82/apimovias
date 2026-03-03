@@ -1,0 +1,29 @@
+{
+  "name": "stage2_machine",
+  "n_samples": 1251,
+  "n_features": 15,
+  "n_classes": 3,
+  "feature_names": [
+    "h_por_dia",
+    "media_h",
+    "max_h",
+    "mediana_h",
+    "std_h",
+    "score_continuidade_h",
+    "taxa_semanas_ativas_h",
+    "taxa_dias_ativos_h",
+    "cv_gaps_h",
+    "gap_medio_h",
+    "gap_max_h",
+    "cv_h",
+    "p25_h",
+    "p75_h",
+    "iqr_h"
+  ],
+  "classes": [
+    0,
+    1,
+    2
+  ],
+  "timestamp": "2026-01-23T09:50:25.614595"
+}

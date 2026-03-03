@@ -19,7 +19,8 @@ from darts import TimeSeries
 import warnings
 warnings.filterwarnings('ignore')
 
-from feature_extraction import TypeFeatureExtractor, SegmentationFeatureExtractor
+
+from moviasai.feature_extraction import TypeFeatureExtractor, SegmentationFeatureExtractor
 # ============================================================================
 # CLASSIFIERS
 # ============================================================================
@@ -215,78 +216,79 @@ class SegmentationClassifier(BaseClassifier):
 class VehiclePredictor:
     """
     Predictor genérico para uso em produção
-    
     Suporta:
     - Predição em lote (DataFrame)
     - Predição individual
     - Predição TimeSeries (Darts)
-    - PKL e ONNX
+    - PKL e ONNX (detectado automaticamente pela extensão)
     """
-    
-    def __init__(self, model_path: str, use_onnx: bool = False):
+    def __init__(self, model_path: str):
         """
         Parameters:
         -----------
         model_path : str
-            Caminho do arquivo do modelo (.pkl)
-        use_onnx : bool
-            Se True, usa ONNX (requer .onnx, _scaler.json e _metadata.json)
+            Caminho do arquivo do modelo (.pkl ou .onnx)
+            - Se .onnx: requer _scaler.json e _metadata.json no mesmo diretório
         """
         self.model_path = Path(model_path)
-        self.use_onnx = use_onnx
-        
+        self._use_onnx = self.model_path.suffix.lower() == '.onnx'
         self.model = None
         self.scaler = None
         self.feature_names = []
         self.metadata = {}
         self.feature_extractor = None
         self.onnx_session = None
-        
+        self._validate_files()
         self._load()
-    
+        
+    def _validate_files(self):
+        """Valida existência de arquivos necessários"""
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"Modelo não encontrado: {self.model_path}")
+        if self._use_onnx:
+            # Verificar arquivos auxiliares do ONNX
+            scaler_path = self.model_path.parent / f'{self.model_path.stem}_scaler.json'
+            metadata_path = self.model_path.parent / f'{self.model_path.stem}_metadata.json'
+            missing = []
+            if not scaler_path.exists():
+                missing.append(str(scaler_path))
+            if not metadata_path.exists():
+                missing.append(str(metadata_path))
+            if missing:
+                raise FileNotFoundError(
+                    f"Arquivos obrigatórios para ONNX não encontrados:\n" +
+                    "\n".join(f"  - {f}" for f in missing)
+                )
     def _load(self):
         """Carrega modelo e componentes"""
-        if self.use_onnx:
+        if self._use_onnx:
             self._load_onnx()
         else:
             self._load_pkl()
-        
         self._load_feature_extractor()
-    
+        
     def _load_pkl(self):
         """Carrega modelo PKL"""
         with open(self.model_path, 'rb') as f:
             data = pickle.load(f)
-        
         self.model = data['model']
         self.scaler = data['scaler']
         self.feature_names = data['feature_names']
         self.metadata = data.get('metadata', {})
-        
         print(f"✓ Modelo PKL carregado: {self.model_path}")
         print(f"  Nome: {self.metadata.get('name', 'N/A')}")
         print(f"  Features: {len(self.feature_names)}")
         print(f"  Classes: {self.metadata.get('n_classes', 'N/A')}")
-    
+        
     def _load_onnx(self):
         """Carrega modelo ONNX com scaler em JSON"""
-        onnx_path = self.model_path.with_suffix('.onnx')
         scaler_json_path = self.model_path.parent / f'{self.model_path.stem}_scaler.json'
         metadata_path = self.model_path.parent / f'{self.model_path.stem}_metadata.json'
-        
-        if not onnx_path.exists():
-            raise FileNotFoundError(f"ONNX não encontrado: {onnx_path}")
-        
-        if not scaler_json_path.exists():
-            raise FileNotFoundError(f"Scaler JSON não encontrado: {scaler_json_path}")
-        
         # Carregar ONNX
-        self.onnx_session = rt.InferenceSession(str(onnx_path))
-        
+        self.onnx_session = rt.InferenceSession(str(self.model_path))
         # Carregar scaler do JSON
         with open(scaler_json_path, 'r') as f:
             scaler_dict = json.load(f)
-        
         # Reconstruir StandardScaler
         self.scaler = StandardScaler()
         self.scaler.mean_ = np.array(scaler_dict['mean'])
@@ -294,71 +296,60 @@ class VehiclePredictor:
         self.scaler.var_ = np.array(scaler_dict['var'])
         self.scaler.n_features_in_ = scaler_dict['n_features_in']
         self.scaler.n_samples_seen_ = scaler_dict['n_samples_seen']
-        
         # Carregar metadata
         with open(metadata_path, 'r') as f:
             self.metadata = json.load(f)
-        
+
         self.feature_names = self.metadata['feature_names']
-        
-        print(f"✓ Modelo ONNX carregado: {onnx_path}")
+        print(f"✓ Modelo ONNX carregado: {self.model_path}")
         print(f"  Scaler (JSON): {scaler_json_path}")
+        print(f"  Metadata: {metadata_path}")
         print(f"  Nome: {self.metadata.get('name', 'N/A')}")
         print(f"  Features: {len(self.feature_names)}")
-    
+        
     def _load_feature_extractor(self):
         """Carrega feature extractor apropriado baseado no modelo"""
         model_name = self.metadata.get('name', '')
-        
         if 'stage1_type' in model_name:
             self.feature_extractor = TypeFeatureExtractor()
             print(f"  Extrator: TypeFeatureExtractor")
             print(f"  Requer: km_dia_clean E h_dia_clean")
-        
         elif 'stage2_displacement' in model_name:
             self.feature_extractor = SegmentationFeatureExtractor('km')
             print(f"  Extrator: SegmentationFeatureExtractor(km)")
             print(f"  Requer: km_dia_clean APENAS")
-        
         elif 'stage2_machine' in model_name:
             self.feature_extractor = SegmentationFeatureExtractor('h')
             print(f"  Extrator: SegmentationFeatureExtractor(h)")
             print(f"  Requer: h_dia_clean APENAS")
-        
         else:
             raise ValueError(f"Tipo de modelo desconhecido: {model_name}")
-        
         print()
-    
+        
     def _predict(self, X_scaled: np.ndarray) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """Executa predição (PKL ou ONNX)"""
-        if self.use_onnx and self.onnx_session:
+        if self._use_onnx:
             # ONNX
             input_name = self.onnx_session.get_inputs()[0].name
             label_name = self.onnx_session.get_outputs()[0].name
-            
             predictions = self.onnx_session.run([label_name], {input_name: X_scaled.astype(np.float32)})[0]
-            
             # Tentar obter probabilidades
             try:
                 prob_name = self.onnx_session.get_outputs()[1].name
                 probabilities = self.onnx_session.run([prob_name], {input_name: X_scaled.astype(np.float32)})[0]
+                probabilities = pd.DataFrame(probabilities).values
             except:
                 probabilities = None
-            
             return predictions, probabilities
-        
         else:
             # PKL
             predictions = self.model.predict(X_scaled)
             probabilities = self.model.predict_proba(X_scaled) if hasattr(self.model, 'predict_proba') else None
-            
             return predictions, probabilities
-    
+          
     def predict_batch(self, df: Union[pl.DataFrame, pd.DataFrame]) -> pd.DataFrame:
         """
         Prediz em lote
-        
         Parameters:
         -----------
         df : pl.DataFrame ou pd.DataFrame
@@ -366,7 +357,6 @@ class VehiclePredictor:
             - stage1_type: veiculo_id, data, km_dia_clean, h_dia_clean
             - stage2_displacement: veiculo_id, data, km_dia_clean
             - stage2_machine: veiculo_id, data, h_dia_clean
-            
         Returns:
         --------
         pd.DataFrame
@@ -374,39 +364,31 @@ class VehiclePredictor:
         """
         # Extrair features
         features = self.feature_extractor.extract(df)
-        
         # Preparar X
         X = features[self.feature_names].values
-        
         # Normalizar usando scaler (funciona para PKL e ONNX)
         X_scaled = self.scaler.transform(X)
-        
         # Predizer
         predictions, probabilities = self._predict(X_scaled)
-        
         # Montar resultado
         result = pd.DataFrame({
             'veiculo_id': features['veiculo_id'],
             'prediction': predictions
         })
-        
         if probabilities is not None:
             for i in range(probabilities.shape[1]):
                 result[f'proba_class_{i}'] = probabilities[:, i]
-        
         return result
-    
+        
     def predict_single(self, df: Union[pl.DataFrame, pd.DataFrame], veiculo_id: int) -> Dict:
         """
         Prediz para um único veículo
-        
         Parameters:
         -----------
         df : pl.DataFrame ou pd.DataFrame
             DataFrame com dados do veículo
         veiculo_id : int
             ID do veículo a predizer
-            
         Returns:
         --------
         dict
@@ -416,28 +398,22 @@ class VehiclePredictor:
             df_vehicle = df.filter(pl.col('veiculo_id') == veiculo_id)
         else:
             df_vehicle = df[df['veiculo_id'] == veiculo_id]
-        
         if len(df_vehicle) == 0:
             raise ValueError(f"Veículo {veiculo_id} não encontrado")
-        
         result_df = self.predict_batch(df_vehicle)
         row = result_df.iloc[0]
-        
         result = {
             'veiculo_id': int(row['veiculo_id']),
             'prediction': int(row['prediction'])
         }
-        
         prob_cols = [c for c in result_df.columns if c.startswith('proba_')]
         if prob_cols:
             result['probabilities'] = {col: float(row[col]) for col in prob_cols}
-        
         return result
-    
+        
     def predict_timeseries(self, ts: TimeSeries, veiculo_id: int) -> Dict:
         """
         Prediz para uma TimeSeries do Darts
-        
         Parameters:
         -----------
         ts : darts.TimeSeries
@@ -447,7 +423,6 @@ class VehiclePredictor:
             - stage2_machine: 1 componente (h_dia_clean)
         veiculo_id : int
             ID do veículo
-            
         Returns:
         --------
         dict
@@ -455,23 +430,18 @@ class VehiclePredictor:
         """
         # Extrair features da TimeSeries
         features = self.feature_extractor.extract_fromm_timeseries(ts, veiculo_id)
-        
         # Preparar X
         X = features[self.feature_names].values
         X_scaled = self.scaler.transform(X)
-        
         # Predizer
         predictions, probabilities = self._predict(X_scaled)
-        
         result = {
             'veiculo_id': veiculo_id,
             'prediction': int(predictions[0])
         }
-        
         if probabilities is not None:
             result['probabilities'] = {
                 f'proba_class_{i}': float(probabilities[0, i])
                 for i in range(probabilities.shape[1])
             }
-        
         return result

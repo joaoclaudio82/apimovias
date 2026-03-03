@@ -67,7 +67,7 @@ def previous_day(dt: datetime, weekday=6) -> datetime:
 
 class DatasetSlicer:
     """
-    Construtor de janelas temporais com critério de semanas ativas (OTIMIZADO)
+    Construtor de janelas temporais com critério de semanas ativas
     
     Cria janelas temporais onde TODAS as semanas devem ter atividade.
     Uma semana é considerada ativa se tem pelo menos um dia com target > 0.
@@ -597,7 +597,9 @@ class DatasetSlicer:
             print("\n📍 Etapa 1: Identificando períodos contínuos...")
         
         df_periods = self._identify_continuous_periods(df)
-        
+        if len(df_periods) == 0:
+            return pl.DataFrame(), pl.DataFrame()
+
         if verbose:
             print(f"   ✓ {len(df_periods):,} períodos identificados")
             print(f"   ✓ {df_periods['veiculo_id'].n_unique():,} veículos únicos")
@@ -666,8 +668,9 @@ class DatasetFormatter:
     
     def __init__(
         self, 
-        dataset_path: str, 
-        target: str, 
+        dataset_path: str | Path = None,
+        df: pd.DataFrame | pl.DataFrame = None,
+        target: str = None,
         min_days: int = 7, 
         min_weeks: int = 5, 
         max_gap: int = 3
@@ -677,8 +680,11 @@ class DatasetFormatter:
         
         Parameters:
         -----------
-        dataset_path : str or Path
+        dataset_path : str ou Path, optional
             Caminho do arquivo CSV com dados brutos
+        df : pandas.DataFrame ou polars.DataFrame, optional
+            DataFrame com dados brutos (alternativa a dataset_path).
+            Tem prioridade sobre dataset_path se ambos forem fornecidos.
         target : str
             Nome da coluna alvo (ex: 'km_dia_clean')
         min_days : int, optional
@@ -687,23 +693,125 @@ class DatasetFormatter:
             Número mínimo de semanas para veículos válidos (padrão: 5)
         max_gap : int, optional
             Máximo de dias de gap permitido (padrão: 3)
-        """
-        self.df = pl.read_csv(
-            dataset_path,
-            columns=['veiculo_id', 'data', target],
-            try_parse_dates=True
+            
+        Examples:
+        ---------
+        # Opção 1: Carregar de arquivo CSV
+        formatter = DatasetFormatter(
+            dataset_path='data/raw.csv',
+            target='km_dia_clean'
         )
         
+        # Opção 2: Usar DataFrame pandas
+        df_pandas = pd.read_csv('data/raw.csv')
+        formatter = DatasetFormatter(
+            df=df_pandas,
+            target='km_dia_clean'
+        )
+        
+        # Opção 3: Usar DataFrame polars
+        df_polars = pl.read_csv('data/raw.csv')
+        formatter = DatasetFormatter(
+            df=df_polars,
+            target='km_dia_clean'
+        )
+        
+        Raises:
+        -------
+        ValueError
+            Se nem dataset_path nem df forem fornecidos
+        ValueError
+            Se target não for especificado
+        ValueError
+            Se as colunas obrigatórias não existirem no DataFrame
+        """
+        # Validação de parâmetros
+        if dataset_path is None and df is None:
+            raise ValueError(
+                "É necessário fornecer 'dataset_path' ou 'df'. "
+                "Exemplo: DatasetFormatter(df=seu_dataframe, target='km_dia_clean')"
+            )
+        
+        if target is None:
+            raise ValueError(
+                "O parâmetro 'target' é obrigatório. "
+                "Exemplo: DatasetFormatter(dataset_path='data.csv', target='km_dia_clean')"
+            )
+        
+        # Processar entrada (df tem prioridade sobre dataset_path)
+        if df is not None:
+            # Usar DataFrame fornecido
+            if isinstance(df, pd.DataFrame):
+                # Converter pandas para polars
+                required_cols = ['veiculo_id', 'data', target]
+                missing_cols = [col for col in required_cols if col not in df.columns]
+                
+                if missing_cols:
+                    raise ValueError(
+                        f"Colunas obrigatórias ausentes no DataFrame: {missing_cols}. "
+                        f"Colunas disponíveis: {list(df.columns)}"
+                    )
+                
+                # Selecionar apenas colunas necessárias e converter
+                df_subset = df[required_cols].copy()
+                
+                # Garantir que 'data' é datetime
+                if not pd.api.types.is_datetime64_any_dtype(df_subset['data']):
+                    df_subset['data'] = pd.to_datetime(df_subset['data'])
+                
+                self.df = pl.from_pandas(df_subset)
+                print("DataFrame pandas convertido para polars")
+                
+            elif isinstance(df, pl.DataFrame):
+                # Usar polars diretamente
+                required_cols = ['veiculo_id', 'data', target]
+                missing_cols = [col for col in required_cols if col not in df.columns]
+                
+                if missing_cols:
+                    raise ValueError(
+                        f"Colunas obrigatórias ausentes no DataFrame: {missing_cols}. "
+                        f"Colunas disponíveis: {list(df.columns)}"
+                    )
+                
+                # Selecionar apenas colunas necessárias
+                self.df = df.select(required_cols)
+                
+                # Garantir que 'data' é date/datetime
+                if self.df['data'].dtype not in [pl.Date, pl.Datetime]:
+                    self.df = self.df.with_columns([
+                        pl.col('data').str.strptime(pl.Date, format='%Y-%m-%d')
+                    ])
+                
+                print("DataFrame polars carregado")
+                
+            else:
+                raise ValueError(
+                    f"Tipo inválido para 'df': {type(df)}. "
+                    "Deve ser pandas.DataFrame ou polars.DataFrame"
+                )
+                
+        else:
+            # Carregar de arquivo CSV
+            self.df = pl.read_csv(
+                str(dataset_path),
+                columns=['veiculo_id', 'data', target],
+                try_parse_dates=True
+            )
+            print(f"Dataset carregado de arquivo: {dataset_path}")
+        
+        # Armazenar parâmetros
         self.target = target
         self.min_days = min_days
         self.min_weeks = min_weeks
         self.max_gap = max_gap
         
+        # Informações do dataset
         print(f"Dataset carregado: {len(self.df):,} registros")
         print(f"Veiculos: {self.df['veiculo_id'].n_unique()}")
         print(f"Target: {target}")
         print()
-    
+
+
     def _get_df_week(self) -> pl.DataFrame:
         """
         Calcula médias diárias por semana 
@@ -1221,6 +1329,9 @@ class DatasetFormatter:
             self.df, 
             verbose=verbose
         )
+
+        if len(df_window) == 0:
+            return pl.DataFrame()
         
         if verbose:
             print(f"Apos construcao de janelas:")
@@ -2306,169 +2417,427 @@ class DatasetGenerator:
             f"  n_records={len(self.df):,}\n"
             f")"
         )
+
+
+# dataset_utils.py (adicionar ao final)
+
+import re
+from pathlib import Path
+from typing import Optional, Dict, List, Union
+import polars as pl
+
+
+class DatasetMerger:
+    """
+    Classe para merge de datasets formatados com raw data
     
+    Responsabilidades:
+    - Extrair chaves (veiculo_id, data) de datasets formatados
+    - Fazer join com raw data
+    - Validar e tratar valores nulos
+    - Salvar resultado (opcional)
+    
+    Examples
+    --------
+    # Uso básico com DataFrames
+    >>> merger = DatasetMerger(verbose=True)
+    >>> df_merged = merger.merge_from_dataframes(
+    ...     df_raw=df_raw,
+    ...     formatted_dfs={'km_dia_clean': df_km, 'h_dia_clean': df_h}
+    ... )
+    
+    # Uso com arquivos
+    >>> df_merged = merger.merge_from_files(
+    ...     path_raw_data='raw.csv',
+    ...     path_km='km_formatted.csv',
+    ...     path_h='h_formatted.csv',
+    ...     output_dir='output'
+    ... )
+    """
+    
+    def __init__(self, verbose: bool = True):
+        """
+        Parameters
+        ----------
+        verbose : bool, default=True
+            Se True, imprime informações durante o processo
+        """
+        self.verbose = verbose
+    
+    def _print(self, message: str):
+        """Imprime mensagem se verbose=True"""
+        if self.verbose:
+            print(message)
+    
+    def _extract_keys(
+        self,
+        formatted_dfs: Dict[str, pl.DataFrame]
+    ) -> pl.DataFrame:
+        """
+        Extrai e concatena chaves (veiculo_id, data) de datasets formatados
+        
+        Parameters
+        ----------
+        formatted_dfs : dict
+            Dicionário {target: df_formatted}
+        
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame com chaves únicas: veiculo_id, data
+        """
+        self._print("Extraindo chaves dos datasets formatados...")
+        
+        dfs_keys = []
+        
+        for target, df in formatted_dfs.items():
+            df_keys = df.select(['veiculo_id', 'data'])
+            dfs_keys.append(df_keys)
+            self._print(f"  • {target}: {len(df_keys):,} registros")
+        
+        # Concatenar
+        self._print("\nConcatenando chaves...")
+        df_keys = pl.concat(dfs_keys)
+        self._print(f"  Total após concatenação: {len(df_keys):,}")
+        
+        # Remover duplicatas e ordenar
+        df_keys = df_keys.unique(subset=['veiculo_id', 'data']).sort(['veiculo_id', 'data'])
+        
+        self._print(f"  Chaves únicas: {len(df_keys):,}")
+        self._print(f"  Veículos únicos: {df_keys['veiculo_id'].n_unique()}")
+        self._print("")
+        
+        return df_keys
+    
+    def _join_with_raw(
+        self,
+        df_keys: pl.DataFrame,
+        df_raw: pl.DataFrame,
+        targets: List[str]
+    ) -> pl.DataFrame:
+        """
+        Faz join das chaves com raw data
+        
+        Parameters
+        ----------
+        df_keys : pl.DataFrame
+            DataFrame com chaves: veiculo_id, data
+        df_raw : pl.DataFrame
+            DataFrame raw com todas as colunas
+        targets : list
+            Lista de targets a extrair do raw
+        
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame merged
+        """
+        self._print("Fazendo join com raw data...")
+        
+        cols_to_select = ['veiculo_id', 'data'] + targets
+        
+        df_merged = df_keys.join(
+            df_raw.select(cols_to_select),
+            on=['veiculo_id', 'data'],
+            how='left'
+        )
+        
+        return df_merged
+    
+    def _validate_and_fill_nulls(
+        self,
+        df_merged: pl.DataFrame,
+        targets: List[str],
+        fill_value: float = 0.0
+    ) -> pl.DataFrame:
+        """
+        Valida e trata valores nulos
+        
+        Parameters
+        ----------
+        df_merged : pl.DataFrame
+            DataFrame merged
+        targets : list
+            Lista de targets a verificar
+        fill_value : float, default=0.0
+            Valor para preencher nulos
+        
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame com nulos tratados
+        """
+        self._print("\nVerificando valores nulos:")
+        
+        has_nulls = False
+        
+        for target in targets:
+            n_nulls = df_merged[target].null_count()
+            
+            if n_nulls > 0:
+                has_nulls = True
+                pct_null = n_nulls / len(df_merged) * 100
+                self._print(f"  ⚠️  {target}: {n_nulls:,} nulos ({pct_null:.2f}%)")
+            else:
+                self._print(f"  ✓ {target}: sem nulos")
+        
+        if has_nulls:
+            self._print(f"\n⚠️  Preenchendo nulos com {fill_value}")
+            
+            fill_exprs = [pl.col(t).fill_null(fill_value) for t in targets]
+            df_merged = df_merged.with_columns(fill_exprs)
+        
+        return df_merged
+    
+    def _print_summary(self, df_merged: pl.DataFrame):
+        """Imprime resumo do dataset merged"""
+        self._print(f"\n✅ Dataset merged:")
+        self._print(f"  • Registros: {len(df_merged):,}")
+        self._print(f"  • Veículos: {df_merged['veiculo_id'].n_unique()}")
+        self._print(f"  • Período: {df_merged['data'].min()} a {df_merged['data'].max()}")
+        self._print(f"  • Colunas: {', '.join(df_merged.columns)}")
+    
+    def merge_from_dataframes(
+        self,
+        df_raw: pl.DataFrame,
+        formatted_dfs: Dict[str, pl.DataFrame],
+        fill_nulls: bool = True,
+        fill_value: float = 0.0
+    ) -> pl.DataFrame:
+        """
+        Merge usando DataFrames em memória
+        
+        Parameters
+        ----------
+        df_raw : pl.DataFrame
+            DataFrame raw com todas as colunas
+        formatted_dfs : dict
+            Dicionário {target: df_formatted}
+            Ex: {'km_dia_clean': df_km, 'h_dia_clean': df_h}
+        fill_nulls : bool, default=True
+            Se True, preenche nulos com fill_value
+        fill_value : float, default=0.0
+            Valor para preencher nulos
+        
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame merged
+        """
+        if self.verbose:
+            print("="*80)
+            print("MERGE DATA (FROM DATAFRAMES)")
+            print("="*80)
+            print()
+            print(f"Targets: {', '.join(formatted_dfs.keys())}")
+            print()
+        
+        targets = list(formatted_dfs.keys())
+        
+        # 1. Extrair chaves
+        df_keys = self._extract_keys(formatted_dfs)
+        
+        # 2. Join com raw
+        df_merged = self._join_with_raw(df_keys, df_raw, targets)
+        
+        # 3. Validar e tratar nulos
+        if fill_nulls:
+            df_merged = self._validate_and_fill_nulls(df_merged, targets, fill_value)
+        
+        # 4. Resumo
+        self._print_summary(df_merged)
+        
+        if self.verbose:
+            print()
+            print("="*80)
+            print()
+        
+        return df_merged
+    
+    def merge_from_files(
+        self,
+        path_raw_data: str,
+        *path_formatted: str,
+        output_dir: Optional[str] = None,
+        fill_nulls: bool = True,
+        fill_value: float = 0.0
+    ) -> pl.DataFrame:
+        """
+        Merge usando arquivos CSV
+        
+        Parameters
+        ----------
+        path_raw_data : str
+            Caminho do dataset raw
+        *path_formatted : str
+            Caminhos dos datasets formatados
+        output_dir : str, optional
+            Diretório para salvar resultado
+        fill_nulls : bool, default=True
+            Se True, preenche nulos
+        fill_value : float, default=0.0
+            Valor para preencher nulos
+        
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame merged
+        
+        Examples
+        --------
+        >>> merger = DatasetMerger()
+        >>> df = merger.merge_from_files(
+        ...     'raw.csv',
+        ...     'km_formatted.csv',
+        ...     'h_formatted.csv',
+        ...     output_dir='output'
+        ... )
+        """
+        if self.verbose:
+            print("="*80)
+            print("MERGE DATA (FROM FILES)")
+            print("="*80)
+            print()
+        
+        if len(path_formatted) == 0:
+            raise ValueError("Pelo menos um path_formatted deve ser fornecido")
+        
+        # Extrair targets e características dos nomes dos arquivos
+        targets = []
+        characteristics = None
+        
+        for path in path_formatted:
+            filename = Path(path).stem
+            
+            match_target = re.search(r'dataset_([^_]+(?:_[^_]+)*)_mindays', filename)
+            if not match_target:
+                raise ValueError(f"Padrão inválido: {filename}")
+            
+            target = match_target.group(1)
+            targets.append(target)
+            
+            match_chars = re.search(r'(mindays\d+_minweeks\d+_maxgap\d+)', filename)
+            if not match_chars:
+                raise ValueError(f"Características não encontradas: {filename}")
+            
+            chars = match_chars.group(1)
+            
+            if characteristics is None:
+                characteristics = chars
+            elif characteristics != chars:
+                raise ValueError(f"Características inconsistentes: {chars} != {characteristics}")
+        
+        self._print(f"Targets: {', '.join(targets)}")
+        self._print(f"Características: {characteristics}")
+        self._print("")
+        
+        # Ler datasets formatados
+        self._print("Lendo datasets formatados...")
+        
+        formatted_dfs = {}
+        
+        for path in path_formatted:
+            target = None
+            for t in targets:
+                if t in Path(path).stem:
+                    target = t
+                    break
+            
+            df = pl.read_csv(path, columns=['veiculo_id', 'data'], try_parse_dates=True)
+            formatted_dfs[target] = df
+            
+            self._print(f"  • {Path(path).name}: {len(df):,} registros")
+        
+        self._print("")
+        
+        # Ler raw
+        self._print("Lendo dataset raw...")
+        
+        cols_raw = ['veiculo_id', 'data'] + targets
+        df_raw = pl.read_csv(path_raw_data, columns=cols_raw, try_parse_dates=True)
+        
+        # Converter data se necessário
+        if df_raw['data'].dtype not in [pl.Date, pl.Datetime]:
+            df_raw = df_raw.with_columns(
+                pl.col('data').str.strptime(pl.Date, '%d/%m/%Y')
+            )
+        
+        self._print(f"  • Registros: {len(df_raw):,}")
+        self._print(f"  • Veículos: {df_raw['veiculo_id'].n_unique()}")
+        self._print("")
+        
+        # Fazer merge
+        df_merged = self.merge_from_dataframes(
+            df_raw=df_raw,
+            formatted_dfs=formatted_dfs,
+            fill_nulls=fill_nulls,
+            fill_value=fill_value
+        )
+        
+        # Salvar
+        if output_dir is not None:
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            targets_str = '_'.join(sorted(targets))
+            filename = f"dataset_{targets_str}_{characteristics}.csv"
+            filepath = output_path / filename
+            
+            self._print(f"Salvando: {filepath}")
+            df_merged.write_csv(filepath)
+            
+            file_size = filepath.stat().st_size / (1024 * 1024)
+            self._print(f"Tamanho: {file_size:.2f} MB")
+            self._print("")
+        
+        if self.verbose:
+            print("="*80)
+            print("CONCLUÍDO")
+            print("="*80)
+            print()
+        
+        return df_merged
+
+
+def merge_data_in_memory(
+    df_raw: pl.DataFrame,
+    df_km: pl.DataFrame,
+    df_h: pl.DataFrame,
+    verbose: bool = True
+) -> pl.DataFrame:
+    """
+    Conveniência para merge KM + H
+    
+    Wrapper para DatasetMerger.merge_from_dataframes()
+    """
+    merger = DatasetMerger(verbose=verbose)
+    
+    return merger.merge_from_dataframes(
+        df_raw=df_raw,
+        formatted_dfs={
+            'km_dia_clean': df_km,
+            'h_dia_clean': df_h
+        }
+    )
+
+
 def merge_data(
     path_raw_data: str,
     *path_data: str,
     output_dir: Optional[str] = None
 ) -> pl.DataFrame:
     """
-    Combina múltiplos datasets com targets diferentes
+    Conveniência para merge de arquivos
     
-    Parameters:
-    -----------
-    path_raw_data : str
-        Caminho do dataset inicial completo
-    *path_data : str
-        Caminhos dos datasets processados
-        
-    Returns:
-    --------
-    pl.DataFrame
-        DataFrame combinado
+    Wrapper para DatasetMerger.merge_from_files()
     """
+    merger = DatasetMerger(verbose=True)
     
-    print("=" * 80)
-    print("MERGE DATA")
-    print("=" * 80)
-    print()
-    
-    if len(path_data) == 0:
-        raise ValueError("Pelo menos um path_data deve ser fornecido")
-    
-    # Extrair targets e características
-    targets = []
-    characteristics = None
-    
-    for path in path_data:
-        filename = Path(path).stem
-        
-        match_target = re.search(r'dataset_([^_]+(?:_[^_]+)*)_mindays', filename)
-        if not match_target:
-            raise ValueError(f"Padrão inválido: {filename}")
-        
-        target = match_target.group(1)
-        targets.append(target)
-        
-        match_chars = re.search(r'(mindays\d+_minweeks\d+_maxgap\d+)', filename)
-        if not match_chars:
-            raise ValueError(f"Características não encontradas: {filename}")
-        
-        chars = match_chars.group(1)
-        
-        if characteristics is None:
-            characteristics = chars
-        elif characteristics != chars:
-            raise ValueError(f"Características inconsistentes: {chars} != {characteristics}")
-    
-    print(f"Targets: {', '.join(targets)}")
-    print(f"Características: {characteristics}")
-    print()
-    
-    # Ler datasets processados (apenas veiculo_id e data)
-    print("Lendo datasets processados...")
-    
-    dfs = []
-    for path in path_data:
-        df = pl.read_csv(path, columns=['veiculo_id', 'data'], try_parse_dates=True)
-        dfs.append(df)
-        print(f"  • {Path(path).name}: {len(df):,} registros")
-    
-    # Concatenar todos os dataframes
-    print("\nConcatenando chaves...")
-    df_keys = pl.concat(dfs)
-    
-    print(f"Total após concatenação: {len(df_keys):,}")
-    
-    # Remover duplicatas (veiculo_id, data) e ordenar
-    df_keys = df_keys.unique(subset=['veiculo_id', 'data']).sort(['veiculo_id', 'data'])
-    
-    print(f"Chaves únicas: {len(df_keys):,}")
-    print(f"Veículos únicos: {df_keys['veiculo_id'].n_unique()}")
-    print()
-    
-    # Ler raw
-    print("Lendo dataset raw...")
-    
-    cols_raw = ['veiculo_id', 'data'] + targets
-    df_raw = pl.read_csv(path_raw_data, columns=cols_raw, try_parse_dates=True)
-    
-    # Converter data se necessário
-    if df_raw['data'].dtype not in [pl.Date, pl.Datetime]:
-        df_raw = df_raw.with_columns(
-            pl.col('data').str.strptime(pl.Date, '%d/%m/%Y')
-        )
-    
-    print(f"  • Registros: {len(df_raw):,}")
-    print(f"  • Veículos: {df_raw['veiculo_id'].n_unique()}")
-    print()
-    
-    # Join com raw
-    print("Fazendo join com raw...")
-    
-    df_merged = df_keys.join(
-        df_raw,
-        on=['veiculo_id', 'data'],
-        how='left'
+    return merger.merge_from_files(
+        path_raw_data,
+        *path_data,
+        output_dir=output_dir
     )
-    
-    # Verificar nulos
-    print("\nVerificando valores nulos:")
-    has_nulls = False
-    
-    for target in targets:
-        n_nulls = df_merged[target].null_count()
-        if n_nulls > 0:
-            has_nulls = True
-            pct_null = n_nulls / len(df_merged) * 100
-            print(f"  ⚠️  {target}: {n_nulls:,} nulos ({pct_null:.2f}%)")
-        else:
-            print(f"  ✓ {target}: sem nulos")
-    
-    if has_nulls:
-        print("\n⚠️  ERRO: Valores nulos encontrados após join!")
-        print("Existem pares (veiculo_id, data) nos datasets processados")
-        print("que não existem no dataset raw.")
-        print()
-        
-        # Mostrar exemplos
-        print("Exemplos de registros com nulos:")
-        null_mask = pl.any_horizontal([pl.col(t).is_null() for t in targets])
-        print(df_merged.filter(null_mask).head(10))
-        print()
-        
-        raise ValueError("Join com raw resultou em valores nulos. Verifique os dados de entrada.")
-    
-    print()
-    print(f"Dataset final:")
-    print(f"  • Registros: {len(df_merged):,}")
-    print(f"  • Veículos: {df_merged['veiculo_id'].n_unique()}")
-    print(f"  • Período: {df_merged['data'].min()} a {df_merged['data'].max()}")
-    print(f"  • Colunas: {', '.join(df_merged.columns)}")
-    print()
-    
-    # Salvar
-    if output_dir is not None:
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        targets_str = '_'.join(sorted(targets))
-        filename = f"dataset_{targets_str}_{characteristics}.csv"
-        filepath = output_path / filename
-        
-        print(f"Salvando: {filepath}")
-        df_merged.write_csv(filepath)
-        
-        file_size = filepath.stat().st_size / (1024 * 1024)
-        print(f"Tamanho: {file_size:.2f} MB")
-        print()
-    
-    print("=" * 80)
-    print("CONCLUÍDO")
-    print("=" * 80)
-    print()
-    
-    return df_merged
 
 
 class ClassSplitter:

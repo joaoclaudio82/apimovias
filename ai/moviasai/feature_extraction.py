@@ -389,5 +389,4 @@ class WeekdayFeatureExtractor(BaseFeatureExtractor):
             if feat_name not in df_pivot.columns:
                 df_pivot[feat_name] = 0.0
         
-        return df_pivot[['veiculo_id'] + self.feature_names]
-    
+        return df_pivot[['veiculo_id'] + self.feature_names]    

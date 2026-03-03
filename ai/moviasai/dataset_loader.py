@@ -14,7 +14,7 @@ import numpy as np
 from joblib import Parallel, delayed
 from tqdm import tqdm
 
-from vehicle_profile import VehicleProfile
+from moviasai.vehicle_profile import VehicleProfile
 
 
 @dataclass

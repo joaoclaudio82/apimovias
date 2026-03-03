@@ -17,7 +17,7 @@ from darts.utils.callbacks import TFMProgressBar
 from darts.models.forecasting.forecasting_model import GlobalForecastingModel
 from darts.models.forecasting.torch_forecasting_model import TorchForecastingModel
 
-from dataset_loader import SlicedDataset, Window
+from moviasai.dataset_loader import SlicedDataset, Window
 
 
 @dataclass
