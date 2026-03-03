@@ -8,15 +8,6 @@ API REST para gerenciamento de perfis de veículos e predições de manutenção
 
 - [Visão Geral](#visão-geral)
 - [Funcionalidades](#funcionalidades)
-- [Arquitetura](#arquitetura)
-- [Instalação](#instalação)
-- [Configuração](#configuração)
-- [Uso](#uso)
-- [Endpoints da API](#endpoints-da-api)
-- [Schemas de Dados](#schemas-de-dados)
-- [Desenvolvimento](#desenvolvimento)
-- [Troubleshooting](#troubleshooting)
-
 ---
 
 ## 🎯 Visão Geral
@@ -72,4 +63,3 @@ A **Movias AI API** é uma solução completa para análise preditiva de manuten
 
 ---
 
-## 🏗️ Arquitetura
