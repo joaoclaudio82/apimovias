@@ -6,6 +6,8 @@ from pathlib import Path
 import yaml
 import logging
 
+from api.config.path_resolver import resolve_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +81,10 @@ class TrainingConfig(BaseModel):
                 'save_models': training.get('save_models', True),
                 'save_results': training.get('save_results', True)
             }
+
+        for field in ("windows_dir", "profile_dir", "work_dir", "cache_dir"):
+            if field in data:
+                data[field] = resolve_path(data[field], yaml_path)
         
         config = cls(**data)
         logger.info(f"Configuração carregada: seed={config.seed}")

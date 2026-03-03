@@ -6,6 +6,8 @@ from pathlib import Path
 import yaml
 import logging
 
+from api.config.path_resolver import resolve_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,13 +50,16 @@ class PredictorConfig(BaseModel):
     def from_yaml(cls, yaml_path: str) -> 'PredictorConfig':
         """Carrega configuração de arquivo YAML"""
         logger.info(f"Carregando configuração de: {yaml_path}")
-        
+
         with open(yaml_path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
-        
+
+        if "models_root_dir" in data:
+            data["models_root_dir"] = resolve_path(data["models_root_dir"], yaml_path)
+
         config = cls(**data)
         logger.info(f"Configuração carregada: {len(config.categories)} categorias")
-        
+
         return config
     
     def get_segment_config(self, category: str, segment: int) -> Optional[SegmentConfig]:

@@ -39,7 +39,7 @@ class DataIngestionService:
         self.session = session
         self.config = config
         self.profile_config = profile_config
-        self.profile_service = VehicleProfileService(session)
+        self.profile_service = VehicleProfileService(session, profile_config, config)
     
     async def run_ingestion(
         self,
@@ -343,4 +343,4 @@ class DataIngestionService:
         
         logger.info(f"   ✅ Mantidos:")
         logger.info(f"      - {self.config.get_windows_dir()}")
-        logger.info(f"      - {self.config.get_profile_dir()}")  
+        logger.info(f"      - {self.config.get_profile_dir()}")

@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AliasChoices, Field
 
 
 class Settings(BaseSettings):
@@ -8,4 +9,7 @@ class Settings(BaseSettings):
         extra='ignore',
     )
 
-    AI_DATABASE_URL_LOCAL: str
+    DATABASE_URL: str = Field(
+        default='sqlite+aiosqlite:///database.db',
+        validation_alias=AliasChoices('DATABASE_URL', 'AI_DATABASE_URL'),
+    )

@@ -2,17 +2,20 @@ PYTHON ?= python3
 AI_PORT ?= 8010
 EXTRACTOR_PORT ?= 8000
 GATEWAY_PORT ?= 8080
-AI_DATABASE_URL_LOCAL ?= sqlite+aiosqlite:///database.db
+AI_LOCAL_DATABASE_URL ?= sqlite+aiosqlite:///database.db
 
 ENV_LOAD = set -a; [ -f .env ] && . ./.env; set +a
 
-.PHONY: ai extractor gateway up
+.PHONY: install ai extractor gateway up
+
+install:
+	@$(PYTHON) -m pip install -r ai/requirements.txt -r extractor/requirements.txt -r gateway/requirements.txt
 
 ai:
 	@$(ENV_LOAD); \
 	cd ai; \
 	PYTHONPATH=. \
-	DATABASE_URL="$${AI_DATABASE_URL_LOCAL:-$(AI_DATABASE_URL_LOCAL)}" \
+	DATABASE_URL="$${DATABASE_URL:-$(AI_LOCAL_DATABASE_URL)}" \
 	$(PYTHON) -m uvicorn api.app:app --host 0.0.0.0 --port "$${AI_API_PORT:-$(AI_PORT)}"
 
 extractor:

@@ -3,13 +3,9 @@
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List
 
-from pydantic import BaseModel, Field
-from typing import List, Optional
-
 
 class ImportFromFileRequest(BaseModel):
-    """Requisição para importar perfis de arquivo"""
-    file_path: Optional[str] = Field(None, description="Path do arquivo. Se None, usa config")
+    """Requisição para importar perfis usando fonte configurada"""
     vehicle_ids: Optional[List[int]] = Field(None, description="IDs específicos para processar")
 
 

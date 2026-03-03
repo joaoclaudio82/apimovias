@@ -6,6 +6,8 @@ from pathlib import Path
 import yaml
 import logging
 
+from api.config.path_resolver import resolve_path, resolve_csv_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,6 +43,11 @@ class DataIngestionConfig(BaseModel):
         
         with open(yaml_path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
+
+        if "dataset_path" in data:
+            data["dataset_path"] = resolve_csv_path(data["dataset_path"], yaml_path)
+        if "output_dir" in data:
+            data["output_dir"] = resolve_path(data["output_dir"], yaml_path)
         
         config = cls(**data)
         logger.info(f"Configuração carregada: {len(config.categories)} categorias")
