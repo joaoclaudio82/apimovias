@@ -317,12 +317,13 @@ class PredictorService:
         # 1. NORMALIZAR (igual ao treinamento)
         upper = profile['upper']
         values_clipped = np.clip(values_raw, 0, upper)
+        max_value = max(values_clipped)
         values_scaled = (
-            values_clipped / upper if upper > 0 else np.zeros_like(values_clipped)
+            values_clipped / max_value if max_value > 0 else np.zeros_like(values_clipped)
         ).reshape(-1, 1)
         
         # Criar índice temporal (últimos history_size dias)
-        last_date = pd.Timestamp(profile['last_activity_date'])
+        last_date = pd.Timestamp(profile['samples_end_date'])
         time_index = pd.date_range(
             end=last_date,
             periods=history_size,
@@ -742,7 +743,7 @@ class PredictorService:
                 if ref_dates_group[i] is not None:
                     final_ref_date = ref_dates_group[i]
                 else:
-                    last_date = pd.Timestamp(profiles[vid]['last_activity_date'])
+                    last_date = pd.Timestamp(profiles[vid]['samples_end_date'])
                     final_ref_date = last_date + pd.Timedelta(days=final_n_steps)
                 
                 all_results.append({
@@ -815,3 +816,268 @@ class PredictorService:
             logger.warning(f"⚠️  {len(failed)} predictors falharam")
         
         return {'loaded': loaded, 'failed': failed}
+
+    async def predict_date_to_reach_with_profiles(
+        self,
+        vehicle_ids: List[int],
+        profiles: Dict[int, Dict],
+        target_values: List[float],
+        n_jobs: int = 1
+    ) -> List[Dict]:
+        """
+        Versão interna que aceita perfis customizados
+        
+        Usado pelo EvaluationService para evitar buscar do banco
+        """
+        if len(vehicle_ids) != len(target_values):
+            raise ValueError(
+                f"vehicle_ids e target_values devem ter mesmo tamanho "
+                f"({len(vehicle_ids)} != {len(target_values)})"
+            )
+        
+        logger.info(f"Iniciando predição date-to-reach para {len(vehicle_ids)} veículos (com perfis customizados)")
+        
+        # Agrupar por (category, segment)
+        groups: Dict[Tuple[str, int], List[Tuple[int, Dict, float]]] = {}
+        
+        for vid, target in zip(vehicle_ids, target_values):
+            if vid not in profiles:
+                logger.warning(f"Perfil não encontrado para veículo {vid}")
+                continue
+            
+            profile = profiles[vid]
+            key = (profile['category'], profile['segment'])
+            
+            if key not in groups:
+                groups[key] = []
+            
+            groups[key].append((vid, profile, target))
+        
+        # Processar cada grupo (mesmo código do método original)
+        all_results = []
+        
+        for (category, segment), group_data in groups.items():
+            logger.info(
+                f"Processando grupo: category={category}, segment={segment}, "
+                f"n_vehicles={len(group_data)}"
+            )
+            
+            try:
+                predictor = self._get_predictor(category, segment)
+            except (ValueError, FileNotFoundError) as e:
+                logger.error(f"Erro ao obter predictor para {category}-{segment}: {e}")
+                continue
+            
+            history_size = predictor.history_size
+            
+            # Criar TimeSeries
+            histories = []
+            past_covs = []
+            targets = []
+            vehicle_ids_group = []
+            
+            for vid, profile, target in group_data:
+                try:
+                    ts, ts_daily = self._create_timeseries_from_profile(
+                        profile,
+                        history_size
+                    )
+                    
+                    histories.append(ts)
+                    past_covs.append(ts_daily)
+                    targets.append(target)
+                    vehicle_ids_group.append(vid)
+                    
+                except ValueError as e:
+                    logger.warning(f"Veículo {vid}: {e}")
+                    continue
+            
+            if not histories:
+                logger.warning(f"Nenhuma série válida para category={category}, segment={segment}")
+                continue
+            
+            logger.info(f"Predizendo {len(histories)} séries com n_jobs={n_jobs}")
+            
+            # Predizer em lote
+            result = predictor.date_to_reach_accumulated(
+                history=histories,
+                target_value=targets,
+                past_covariates=past_covs if predictor.supports_past_covariates else None,
+                n_jobs=n_jobs
+            )
+            
+            # Formatar resultados
+            dates = result['date'] if isinstance(result['date'], list) else [result['date']]
+            n_steps_list = result['n_steps'] if isinstance(result['n_steps'], list) else [result['n_steps']]
+            paths = result['path'] if isinstance(result['path'], list) else [result['path']]
+            
+            for vid, date, n_steps, path in zip(vehicle_ids_group, dates, n_steps_list, paths):
+                accumulated = float(path.values()[:, 0].sum())
+                target_idx = vehicle_ids_group.index(vid)
+                
+                all_results.append({
+                    'vehicle_id': vid,
+                    'category': category,
+                    'segment': segment,
+                    'target_value': targets[target_idx],
+                    'predicted_date': date.isoformat(),
+                    'n_steps': n_steps,
+                    'accumulated_value': accumulated
+                })
+            
+            logger.info(f"✅ Grupo processado: {len(all_results)} resultados")
+        
+        logger.info(f"Predição date-to-reach concluída: {len(all_results)} resultados")
+        
+        return all_results
+
+
+    async def predict_accumulated_at_step_with_profiles(
+        self,
+        vehicle_ids: List[int],
+        profiles: Dict[int, Dict],
+        n_steps: Optional[List[int]] = None,
+        reference_dates: Optional[List[str]] = None,
+        n_jobs: int = 1
+    ) -> List[Dict]:
+        """
+        Versão interna que aceita perfis customizados
+        
+        Usado pelo EvaluationService para evitar buscar do banco
+        """
+        if n_steps is None and reference_dates is None:
+            raise ValueError("Deve fornecer n_steps ou reference_dates")
+        
+        n_vehicles = len(vehicle_ids)
+        
+        logger.info(f"Iniciando predição accumulated-at-step para {n_vehicles} veículos (com perfis customizados)")
+        
+        # Normalizar n_steps
+        if n_steps is None:
+            n_steps_list = [None] * n_vehicles
+        elif isinstance(n_steps, int):
+            n_steps_list = [n_steps] * n_vehicles
+        else:
+            n_steps_list = n_steps
+            if len(n_steps_list) != n_vehicles:
+                raise ValueError(
+                    f"n_steps deve ter mesmo tamanho que vehicle_ids "
+                    f"({len(n_steps_list)} != {n_vehicles})"
+                )
+        
+        # Normalizar reference_dates
+        if reference_dates is None:
+            ref_dates_list = [None] * n_vehicles
+        elif isinstance(reference_dates, str):
+            ref_dates_list = [pd.Timestamp(reference_dates)] * n_vehicles
+        else:
+            ref_dates_list = [pd.Timestamp(d) if d else None for d in reference_dates]
+            if len(ref_dates_list) != n_vehicles:
+                raise ValueError(
+                    f"reference_dates deve ter mesmo tamanho que vehicle_ids "
+                    f"({len(ref_dates_list)} != {n_vehicles})"
+                )
+        
+        # Agrupar por (category, segment)
+        groups: Dict[Tuple[str, int], List] = {}
+        
+        for i, vid in enumerate(vehicle_ids):
+            if vid not in profiles:
+                logger.warning(f"Perfil não encontrado para veículo {vid}")
+                continue
+            
+            profile = profiles[vid]
+            key = (profile['category'], profile['segment'])
+            
+            if key not in groups:
+                groups[key] = []
+            
+            groups[key].append((vid, profile, n_steps_list[i], ref_dates_list[i]))
+        
+        # Processar cada grupo (mesmo código do método original)
+        all_results = []
+        
+        for (category, segment), group_data in groups.items():
+            logger.info(
+                f"Processando grupo: category={category}, segment={segment}, "
+                f"n_vehicles={len(group_data)}"
+            )
+            
+            try:
+                predictor = self._get_predictor(category, segment)
+            except (ValueError, FileNotFoundError) as e:
+                logger.error(f"Erro ao obter predictor para {category}-{segment}: {e}")
+                continue
+            
+            history_size = predictor.history_size
+            
+            # Criar TimeSeries
+            histories = []
+            past_covs = []
+            n_steps_group = []
+            ref_dates_group = []
+            vehicle_ids_group = []
+            
+            for vid, profile, n_step, ref_date in group_data:
+                try:
+                    ts, ts_daily = self._create_timeseries_from_profile(
+                        profile,
+                        history_size
+                    )
+                    
+                    histories.append(ts)
+                    past_covs.append(ts_daily)
+                    n_steps_group.append(n_step)
+                    ref_dates_group.append(ref_date)
+                    vehicle_ids_group.append(vid)
+                    
+                except ValueError as e:
+                    logger.warning(f"Veículo {vid}: {e}")
+                    continue
+            
+            if not histories:
+                logger.warning(f"Nenhuma série válida para category={category}, segment={segment}")
+                continue
+            
+            logger.info(f"Predizendo {len(histories)} séries com n_jobs={n_jobs}")
+            
+            # Predizer em lote
+            result = predictor.predict_accumulated_at_step(
+                history=histories,
+                n_steps=n_steps_group if any(s is not None for s in n_steps_group) else None,
+                reference_date=ref_dates_group if any(d is not None for d in ref_dates_group) else None,
+                past_covariates=past_covs if predictor.supports_past_covariates else None,
+                n_jobs=n_jobs
+            )
+            
+            # Formatar resultados
+            accumulated_values = (
+                result['accumulated_value'] 
+                if isinstance(result['accumulated_value'], list) 
+                else [result['accumulated_value']]
+            )
+            paths = result['path'] if isinstance(result['path'], list) else [result['path']]
+            
+            for i, (vid, acc_value, path) in enumerate(zip(vehicle_ids_group, accumulated_values, paths)):
+                final_n_steps = n_steps_group[i] if n_steps_group[i] is not None else len(path)
+                
+                if ref_dates_group[i] is not None:
+                    final_ref_date = ref_dates_group[i]
+                else:
+                    last_date = pd.Timestamp(profiles[vid]['samples_end_date'])
+                    final_ref_date = last_date + pd.Timedelta(days=final_n_steps)
+                
+                all_results.append({
+                    'vehicle_id': vid,
+                    'category': category,
+                    'segment': segment,
+                    'n_steps': final_n_steps,
+                    'reference_date': final_ref_date.isoformat(),
+                    'accumulated_value': float(acc_value)
+                })
+            
+            logger.info(f"✅ Grupo processado: {len(all_results)} resultados")
+        
+        logger.info(f"Predição accumulated-at-step concluída: {len(all_results)} resultados")
+        
+        return all_results

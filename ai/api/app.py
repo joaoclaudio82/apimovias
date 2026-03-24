@@ -7,7 +7,7 @@ from pathlib import Path
 
 from api.database import engine
 from api.models import table_registry
-from api.routers import vehicle_profiles, predictions, data_ingestion, training
+from api.routers import vehicle_profiles, predictions, data_ingestion, training, evaluation
 from api.schemas import Message
 from api.config.prediction_config import PredictorConfig
 from api.config.vehicle_profile_config import VehicleProfileConfig
@@ -134,3 +134,4 @@ app.include_router(vehicle_profiles.router)
 app.include_router(predictions.router)
 app.include_router(data_ingestion.router)
 app.include_router(training.router)
+app.include_router(evaluation.router)

@@ -40,7 +40,7 @@ class PredictorEvaluator:
         history_size: int = 28,
         model_names: Optional[List[str]] = None,
         cache_dir: str = '.cache/predictor',
-        max_steps: int = 90,  # REDUZIDO de 365 para 90
+        max_steps: int = 90,  
         verbose: bool = True,
         suppress_warnings: bool = True
     ):

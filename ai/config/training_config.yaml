@@ -42,7 +42,7 @@ training:
       enabled: true
       models:
         - LightGBM
-        - XGBoost
+        - XGBModel
         - LinearRegression
       
       # Configurações específicas Global

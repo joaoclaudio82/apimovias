@@ -31,7 +31,7 @@ categories:
       # Segmento 1: Veículos de média quilometragem
       - segment: 1
         models:
-          - model_name: DLinearModel
+          - model_name: LinearRegressionModel
             weight: 1.0
       
       # Segmento 2: Veículos de alta quilometragem
@@ -48,17 +48,17 @@ categories:
       # Segmento 0: Equipamentos de baixa utilização
       - segment: 0
         models:
-          - model_name: DLinearModel
+          - model_name: XGBModel
             weight: 1.0
       
       # Segmento 1: Equipamentos de média utilização
       - segment: 1
         models:
-          - model_name: DLinearModel
+          - model_name: LightGBMModel
             weight: 1.0
       
       # Segmento 2: Equipamentos de alta utilização
       - segment: 2
         models:
-          - model_name: DLinearModel
+          - model_name: LinearRegressionModel
             weight: 1.0
