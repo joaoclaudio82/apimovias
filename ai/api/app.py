@@ -120,7 +120,7 @@ app = FastAPI(
 
 
 @app.get(
-    '/',
+    '/health',
     status_code=HTTPStatus.OK,
     response_model=Message,
     tags=['health'],

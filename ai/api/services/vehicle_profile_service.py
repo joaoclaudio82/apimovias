@@ -49,13 +49,12 @@ class VehicleProfileService:
 
     async def import_from_file(
         self,
-        file_path: Optional[str] = None,
         vehicle_ids: Optional[List[int]] = None
     ) -> Dict[str, any]:
         """
         Importa e atualiza perfis de arquivo externo
         Fluxo completo:
-        1. Carrega arquivo (usa config.input_data se não fornecido)
+        1. Carrega arquivo da fonte configurada automaticamente
         2. Divide em veículos existentes (km/h) e novos (unk)
         3. Recupera samples do banco para veículos existentes
         4. Concatena dados novos com samples antigos
@@ -65,9 +64,7 @@ class VehicleProfileService:
         8. Salva no banco
         Parameters
         ----------
-        file_path : str, optional
-            Path do arquivo. Se None, usa config.input_data
-            vehicle_ids : List[int], optional
+        vehicle_ids : List[int], optional
             Se fornecido, processa apenas esses veículos
         Returns
         -------
@@ -84,9 +81,8 @@ class VehicleProfileService:
         logger.info("IMPORTAÇÃO DE PERFIS")
         logger.info("="*60)
         
-        # 1. Carregar arquivo
-        if file_path is None:
-            file_path = self.config.input_data
+        # 1. Carregar arquivo da configuração (com fallback já resolvido no loader)
+        file_path = self.config.input_data
         
         logger.info(f"\n1️⃣ Carregando arquivo: {file_path}")
         df_raw = pl.read_csv(

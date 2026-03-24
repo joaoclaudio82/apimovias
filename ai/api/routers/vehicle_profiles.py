@@ -1,6 +1,6 @@
 # api/routers/vehicle_profiles.py
 
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Body
 from fastapi.responses import StreamingResponse
 
 from http import HTTPStatus
@@ -254,13 +254,13 @@ async def get_vehicles_by_segment(
 
 @router.post('/import', response_model=ImportFromFileResponse)
 async def import_from_file(
-    request: ImportFromFileRequest,
+    request: ImportFromFileRequest = Body(default_factory=ImportFromFileRequest),
     service: VehicleProfileService = Depends(get_service)
 ):
     """
-    Importa e atualiza perfis de arquivo externo
+    Importa e atualiza perfis usando o CSV configurado automaticamente.
   Pipeline completo unificado:
-    1. Carrega arquivo
+    1. Carrega arquivo da configuração/fallback
     2. Separa existentes/novos
     3. Atualiza existentes (concatena com samples)
     4. Classifica novos
@@ -270,7 +270,6 @@ async def import_from_file(
     """
     try:
         result = await service.import_from_file(
-            file_path=request.file_path,
             vehicle_ids=request.vehicle_ids
         )
         return ImportFromFileResponse(status='success', **result)

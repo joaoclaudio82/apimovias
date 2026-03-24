@@ -35,7 +35,6 @@ COPY api ./api
 COPY config ./config
 COPY moviasai ./moviasai
 COPY __init__.py ./__init__.py
-COPY proxy.py ./proxy.py
 RUN mkdir -p /app/data
 
 EXPOSE 8000
