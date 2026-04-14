@@ -10,7 +10,7 @@ models_root_dir: "../models/ts"
 # Parâmetros globais de predição (aplicados a todos os modelos)
 history_size: 28          # Tamanho do histórico (dias)
 forecast_horizon: 7       # Horizonte de previsão (dias)
-max_steps: 28           # Máximo de steps para predição autoregressiva
+max_steps: 180           # Máximo de steps para predição autoregressiva
 
 # ============================================================
 # CONFIGURAÇÕES POR CATEGORIA E SEGMENTO

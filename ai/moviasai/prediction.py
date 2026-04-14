@@ -293,7 +293,20 @@ class Predictor:
             times=first_pred.time_index,
             values=weighted_pred
         )
-    
+
+    def _clip_prediction_series(
+            self,
+            ts: TimeSeries,
+            min_value: float = 0.0,
+            max_value: float = 1.0
+    ) -> TimeSeries:
+        clipped_values = np.clip(ts.values(copy=False), min_value, max_value)
+        return TimeSeries.from_times_and_values(
+            times=ts.time_index,
+            values=clipped_values,
+            columns=ts.components
+        )
+
     def _autoregressive_predict(
         self,
         history: TimeSeries,
@@ -312,13 +325,15 @@ class Predictor:
         if n_steps <= self.forecast_horizon:
             # Predição direta
             if self.is_ensemble:
-                return self._ensemble_predict(
+                pred = self._ensemble_predict(
                     n_steps, history, past_covariates, future_covariates
                 )
             else:
-                return self._predict_single_model(
+                pred = self._predict_single_model(
                     self.models[0], n_steps, history, past_covariates, future_covariates
                 )
+
+            return self._clip_prediction_series(pred)
         
         # Predição autoregressiva
         all_predictions = []
@@ -358,6 +373,7 @@ class Predictor:
                 )
             
             # Armazenar predições
+            pred = self._clip_prediction_series(pred)
             all_predictions.append(pred)
             
             # Atualizar histórico

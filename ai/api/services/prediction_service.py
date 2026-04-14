@@ -88,6 +88,22 @@ class PredictorService:
         self._register_custom_encoders()
 
     @staticmethod
+    def _scaled_daily_values_from_path(path: TimeSeries) -> np.ndarray:
+        values = path.values(copy=False)[:, 0].astype(float)
+        return np.clip(values, 0.0, 1.0)
+
+    def _denormalize_path_sum(self, profile: Dict, path: TimeSeries) -> float:
+        upper = float(profile['upper'])
+        scaled_values = self._scaled_daily_values_from_path(path)
+        return float((scaled_values * upper).sum())
+
+    def _scale_accumulated_target(self, target_value: float, profile: Dict) -> float:
+        upper = float(profile['upper'])
+        if upper <= 0:
+            return 0.0
+        return float(target_value / upper)
+
+    @staticmethod
     def _register_custom_encoders():
         """
         Registra encoders customizados no namespace global
@@ -315,11 +331,10 @@ class PredictorService:
         values_raw = np.array(samples[-history_size:])
         
         # 1. NORMALIZAR (igual ao treinamento)
-        upper = profile['upper']
+        upper = float(profile['upper'])
         values_clipped = np.clip(values_raw, 0, upper)
-        max_value = max(values_clipped)
         values_scaled = (
-            values_clipped / max_value if max_value > 0 else np.zeros_like(values_clipped)
+            values_clipped / upper if upper > 0 else np.zeros_like(values_clipped)
         ).reshape(-1, 1)
         
         # Criar índice temporal (últimos history_size dias)
@@ -350,8 +365,11 @@ class PredictorService:
             f'p75_{category}',
             f'iqr_{category}'
         ]
-        
-        static_cov_dict = {feat: profile[feat] for feat in segmentation_features}
+
+        static_cov_dict = {
+            feat: (np.clip(profile[feat], 0, upper) / upper if upper > 0 else 0.0)
+            for feat in segmentation_features
+        }
         static_cov = pd.DataFrame([static_cov_dict])
         
         # 3. TIMESERIES principal
@@ -512,7 +530,7 @@ class PredictorService:
                     
                     histories.append(ts)
                     past_covs.append(ts_daily)
-                    targets.append(target)
+                    targets.append(self._scale_accumulated_target(target, profile))
                     vehicle_ids_group.append(vid)
                     
                 except ValueError as e:
@@ -539,14 +557,14 @@ class PredictorService:
             paths = result['path'] if isinstance(result['path'], list) else [result['path']]
             
             for vid, date, n_steps, path in zip(vehicle_ids_group, dates, n_steps_list, paths):
-                accumulated = float(path.values()[:, 0].sum())
+                accumulated = self._denormalize_path_sum(profiles[vid], path)
                 target_idx = vehicle_ids_group.index(vid)
-                
+
                 all_results.append({
                     'vehicle_id': vid,
                     'category': category,
                     'segment': segment,
-                    'target_value': targets[target_idx],
+                    'target_value': float(target_values[vehicle_ids.index(vid)]),
                     'predicted_date': date.isoformat(),
                     'n_steps': n_steps,
                     'accumulated_value': accumulated
@@ -736,10 +754,11 @@ class PredictorService:
             )
             paths = result['path'] if isinstance(result['path'], list) else [result['path']]
             
-            for i, (vid, acc_value, path) in enumerate(zip(vehicle_ids_group, accumulated_values, paths)):
+            for i, (vid, path) in enumerate(zip(vehicle_ids_group, paths)):
                 # Determinar n_steps e reference_date finais
                 final_n_steps = n_steps_group[i] if n_steps_group[i] is not None else len(path)
-                
+                acc_value = self._denormalize_path_sum(profiles[vid], path)
+
                 if ref_dates_group[i] is not None:
                     final_ref_date = ref_dates_group[i]
                 else:
@@ -752,7 +771,7 @@ class PredictorService:
                     'segment': segment,
                     'n_steps': final_n_steps,
                     'reference_date': final_ref_date.isoformat(),
-                    'accumulated_value': float(acc_value)
+                    'accumulated_value': acc_value
                 })
             
             logger.info(f"✅ Grupo processado: {len(all_results)} resultados")
