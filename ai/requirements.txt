@@ -12,11 +12,13 @@ sqlalchemy>=2.0.43,<2.1
 alembic>=1.17.2
 tzdata>=2025.2
 aiosqlite>=0.21.0
-optuna>=4.6.0 
+optuna>=4.6.0
+optuna-integration[tensorboard]>=4.8.0
 xgboost>=3.1.2
 skl2onnx>=1.19.1
 onnxruntime>=1.23.2
 onnxmltools>=1.14.0
+onnxscript>=0.7.0
 lightgbm>=4.6.0
 streamlit>=1.52.1
 u8darts[all]

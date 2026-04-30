@@ -1,0 +1,19 @@
+# config/dataset_config.yaml
+
+# ============================================================
+# CONFIGURAÇÃO DE GERAÇÃO DE DATASET DE TREINAMENTO
+# ============================================================
+# Parâmetros do ProfileDatasetGenerator para geração do dataset de treinamento a partir dos perfis semanais.
+
+min_weeks_general: 12       # Semanas mínimas no período efetivo
+num_weeks_recent: 4         # Semanas de histórico recente (X_recent)
+horizon_weeks: 4            # Semanas de horizonte (int ou lista, ex: [1, 1, 2])
+daily_horizon: 7            # Horizonte diário curto (y_daily)
+min_recent_active_days: 5   # Dias ativos mínimos no histórico recente
+
+# ---- Features de classificação (cluster) ----
+# Valores possíveis: prediction, probabilities, null
+# prediction:     cluster_0..cluster_n com valores 0 ou 1 (one-hot)
+# probabilities:  cluster_0..cluster_n com valores entre 0 e 1
+# null:           sem features de cluster
+cluster_features: probabilities

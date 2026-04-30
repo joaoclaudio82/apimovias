@@ -1,1083 +1,793 @@
-# api/services/predictor_service.py
+# api/services/prediction_service.py
 
-import sys
-from typing import List, Dict, Optional, Tuple
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-import pandas as pd
-import numpy as np
-from pathlib import Path
+"""
+Serviço de predição: executa inferência ONNX e (opcionalmente) persiste resultados.
+
+Fluxo:
+1. Carrega perfis (vehicle_profile) e metadados do banco
+2. Carrega histórico recente (daily_activity)
+3. Alinha e valida séries recentes (trunca ao último domingo, exige num_days completos)
+4. Gera DataInput e normaliza
+5. Executa inferência ONNX via ForecastingPredictor
+6. Calcula datas de predição (daily e heads)
+7. Retorna ou persiste resultados
+"""
+
+from __future__ import annotations
+
+import asyncio
 import logging
-from darts import TimeSeries
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-from darts.models import (
-    DLinearModel,
-    NLinearModel,
-    TSMixerModel,
-    TCNModel,
-    NBEATSModel,
-    NHiTSModel,
-    LightGBMModel,
-    XGBModel,
-    LinearRegressionModel
+import numpy as np
+import pandas as pd
+import polars as pl
+from sqlalchemy import delete, insert, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.database import session_context
+from api.models import (
+    DailyActivity,
+    PredictionDaily,
+    PredictionHead,
+    VehicleMetadataH,
+    VehicleMetadataKm,
+    VehicleProfileFeature,
 )
-
-from api.services.vehicle_profile_service import VehicleProfileService
-from api.config.prediction_config import PredictorConfig
-from moviasai.prediction import Predictor
-from moviasai.covariates import is_weekday, week_of_month
 
 logger = logging.getLogger(__name__)
 
-# Mapeamento de nome para classe do modelo
-MODEL_CLASS_MAP = {
-    'DLinearModel': DLinearModel,
-    'NLinearModel': NLinearModel,
-    'TSMixerModel': TSMixerModel,
-    'TCNModel': TCNModel,
-    'NBEATSModel': NBEATSModel,
-    'NHiTSModel': NHiTSModel,
-    'LightGBMModel': LightGBMModel,
-    'XGBModel': XGBModel,
-    'LinearRegressionModel': LinearRegressionModel,
-}
+_CONFIG_DIR = Path(__file__).parent.parent.parent / "config"
 
 
-class PredictorService:
+def _config_path(name: str) -> str:
+    return str(_CONFIG_DIR / name)
+
+
+# ------------------------------------------------------------------
+# DB: carregar dados
+# ------------------------------------------------------------------
+
+
+async def _load_vehicle_profiles(
+    session: AsyncSession,
+    target: str,
+    vehicle_ids: Optional[List[int]] = None,
+) -> pd.DataFrame:
     """
-    Service para gerenciar predições de veículos
-    
-    Responsabilidades:
-    - Carregar modelos treinados do disco
-    - Criar predictors com modelos únicos ou ensembles
-    - Buscar perfis de veículos
-    - Criar TimeSeries para predição
-    - Executar predições em lote com paralelização
-    
-    Examples
-    --------
-    >>> async with AsyncSessionLocal() as session:
-    ...     config = PredictorConfig.from_yaml('config/predictor_config.yaml')
-    ...     service = PredictorService(session, config)
-    ...     
-    ...     # Predizer quando vai atingir 10.000 km
-    ...     results = await service.predict_date_to_reach(
-    ...         vehicle_ids=[1316, 18230],
-    ...         target_values=[10000.0, 15000.0],
-    ...         n_jobs=-1
-    ...     )
-    """
-    
-    def __init__(
-        self,
-        session: AsyncSession,
-        config: PredictorConfig,
-        profile_service: VehicleProfileService
-    ):
-        self.session = session
-        self.config = config
-        self.profile_service = profile_service
-        
-        # Cache de modelos carregados
-        # Key: (category, segment, model_name)
-        self._model_cache: Dict[Tuple[str, int, str], object] = {}
-        
-        # Cache de predictors
-        # Key: (category, segment)
-        self._predictor_cache: Dict[Tuple[str, int], Predictor] = {}
-        self._register_custom_encoders()
+    Carrega vehicle_profile (formato long) e pivota para wide.
 
-    @staticmethod
-    def _register_custom_encoders():
-        """
-        Registra encoders customizados no namespace global
-        
-        Necessário para que pickle consiga desserializar os modelos
-        que foram salvos com essas funções.
-        """
-        import __main__
-        
-        # Registrar no __main__ para pickle encontrar
-        __main__.week_of_month = week_of_month
-        __main__.is_weekday = is_weekday
-        
-        # Registrar também no sys.modules
-        import moviasai.covariates
-        sys.modules['covariates'] = moviasai.covariates
-        
-        logger.debug("✅ Encoders customizados registrados")
-    
-    def _load_model(self, model_name: str, category: str, segment: int):
-        """
-        Carrega modelo do disco (com cache)
-        
-        Carrega de: {models_root_dir}/{model_name}/dataset_{category}_*_class{segment}_*/model_00.pkl
-        
-        Parameters
-        ----------
-        model_name : str
-            Nome do modelo (ex: 'DLinearModel', 'TSMixerModel')
-        category : str
-            Categoria ('km' ou 'h')
-        segment : int
-            Número do segmento (0, 1, 2)
-        
-        Returns
-        -------
-        model
-            Modelo Darts carregado
-        
-        Raises
-        ------
-        FileNotFoundError
-            Se modelo não for encontrado
-        ValueError
-            Se classe do modelo não estiver mapeada
-        """
-        cache_key = (category, segment, model_name)
-        
-        if cache_key in self._model_cache:
-            logger.debug(f"Modelo em cache: {cache_key}")
-            return self._model_cache[cache_key]
-        
-        # Encontrar diretório do modelo
-        model_dir = self.config.find_model_path(model_name, category, segment)
-        
-        if model_dir is None:
-            raise FileNotFoundError(
-                f"Diretório do modelo não encontrado: {model_name} "
-                f"(category={category}, segment={segment})"
-            )
-        
-        # Path do arquivo do modelo
-        model_file = model_dir / "model_00.pkl"
-        
-        if not model_file.exists():
-            raise FileNotFoundError(
-                f"Arquivo do modelo não encontrado: {model_file}"
-            )
-        
-        # Obter classe do modelo
-        if model_name not in MODEL_CLASS_MAP:
-            available = ', '.join(MODEL_CLASS_MAP.keys())
-            raise ValueError(
-                f"Modelo não suportado: {model_name}. "
-                f"Modelos disponíveis: {available}"
-            )
-        
-        model_class = MODEL_CLASS_MAP[model_name]
-        
-        logger.info(f"Carregando modelo: {model_file}")
-        
-        # Carregar modelo usando método .load() da classe
-        try:
-            model = model_class.load(str(model_file))
-        except Exception as e:
-            logger.error(f"Erro ao carregar modelo {model_file}: {e}")
-            raise
-        
-        # Cache
-        self._model_cache[cache_key] = model
-        
-        logger.info(
-            f"✅ Modelo carregado: {model_name} "
-            f"(category={category}, segment={segment})"
+    Retorna DataFrame com colunas: veiculo_id, feat_1, feat_2, ...
+    """
+    stmt = select(
+        VehicleProfileFeature.veiculo_id,
+        VehicleProfileFeature.feature,
+        VehicleProfileFeature.valor,
+    ).where(VehicleProfileFeature.feature_class == target)
+
+    if vehicle_ids is not None:
+        stmt = stmt.where(VehicleProfileFeature.veiculo_id.in_(vehicle_ids))
+
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    if not rows:
+        return pd.DataFrame(columns=["veiculo_id"])
+
+    df_long = pd.DataFrame(rows, columns=["veiculo_id", "feature", "valor"])
+    df_profile = df_long.pivot(
+        index="veiculo_id", columns="feature", values="valor",
+    ).reset_index()
+    df_profile.columns.name = None
+    return df_profile
+
+
+async def _load_type_probabilities(
+    session: AsyncSession,
+    vehicle_ids: List[int],
+) -> Dict[int, Dict[str, float]]:
+    """Carrega probabilidades de tipo (feature_class='type') para veículos."""
+    stmt = select(
+        VehicleProfileFeature.veiculo_id,
+        VehicleProfileFeature.feature,
+        VehicleProfileFeature.valor,
+    ).where(
+        VehicleProfileFeature.feature_class == "type",
+        VehicleProfileFeature.veiculo_id.in_(vehicle_ids),
+    )
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    probs: Dict[int, Dict[str, float]] = {}
+    for vid, feat, val in rows:
+        probs.setdefault(vid, {})[feat] = val
+    return probs
+
+
+async def _load_metadata(
+    session: AsyncSession,
+    target: str,
+    vehicle_ids: Optional[List[int]] = None,
+) -> pd.DataFrame:
+    """Carrega metadados (upper, quality, quality_reason) para o target."""
+    model_cls = VehicleMetadataKm if target == "km" else VehicleMetadataH
+    stmt = select(
+        model_cls.veiculo_id,
+        model_cls.upper,
+        model_cls.quality,
+        model_cls.quality_reason,
+    )
+    if vehicle_ids is not None:
+        stmt = stmt.where(model_cls.veiculo_id.in_(vehicle_ids))
+    result = await session.execute(stmt)
+    rows = result.all()
+    return pd.DataFrame(rows, columns=["veiculo_id", "upper", "quality", "quality_reason"])
+
+
+async def _load_daily_activity(
+    session: AsyncSession,
+    target: str,
+    vehicle_ids: List[int],
+    num_days: int,
+) -> pl.DataFrame:
+    """
+    Carrega atividade diária recente para os veículos indicados.
+
+    Carrega mais dias do que o necessário (num_days + 7) para compensar
+    o truncamento ao último domingo.
+    """
+    target_col = "km" if target == "km" else "h"
+    fetch_days = num_days + 7  # margem para truncamento ao domingo
+
+    # Gerar placeholders para IN clause (SQLite não suporta IN com tuple)
+    placeholders = ", ".join(f":id_{i}" for i in range(len(vehicle_ids)))
+    params = {f"id_{i}": vid for i, vid in enumerate(vehicle_ids)}
+
+    stmt = text(f"""
+        SELECT veiculo_id, data, {target_col} AS value
+        FROM daily_activity
+        WHERE veiculo_id IN ({placeholders})
+        AND data >= (
+            SELECT DATE(MAX(da2.data), '-{fetch_days} days')
+            FROM daily_activity da2
+            WHERE da2.veiculo_id = daily_activity.veiculo_id
         )
-        
-        return model
-    
-    def _get_predictor(self, category: str, segment: int) -> Predictor:
-        """
-        Obtém predictor para categoria/segmento (com cache)
-        
-        Parameters
-        ----------
-        category : str
-            Categoria ('km' ou 'h')
-        segment : int
-            Número do segmento
-        
-        Returns
-        -------
-        Predictor
-            Predictor configurado para o segmento
-        
-        Raises
-        ------
-        ValueError
-            Se configuração não for encontrada
-        FileNotFoundError
-            Se modelo não for encontrado
-        """
-        cache_key = (category, segment)
-        
-        if cache_key in self._predictor_cache:
-            logger.debug(f"Predictor em cache: {cache_key}")
-            return self._predictor_cache[cache_key]
-        
-        # Obter configuração do segmento
-        seg_config = self.config.get_segment_config(category, segment)
-        
-        if seg_config is None:
-            raise ValueError(
-                f"Configuração não encontrada para category={category}, segment={segment}"
-            )
-        
-        # Carregar modelos
-        models = []
-        weights = []
-        
-        for model_config in seg_config.models:
-            model = self._load_model(
-                model_config.model_name,
-                category,
-                segment
-            )
-            models.append(model)
-            weights.append(model_config.weight)
-        
-        # Criar predictor usando configurações globais
-        if len(models) == 1:
-            predictor = Predictor(
-                model=models[0],
-                history_size=self.config.history_size,
-                forecast_horizon=self.config.forecast_horizon,
-                max_steps=self.config.max_steps,
-                verbose=False
-            )
-            logger.info(
-                f"✅ Predictor criado (modelo único): "
-                f"category={category}, segment={segment}, "
-                f"model={seg_config.models[0].model_name}"
-            )
+        ORDER BY veiculo_id, data
+    """).bindparams(**params)
+
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    if not rows:
+        return pl.DataFrame(schema={"veiculo_id": pl.Int64, "data": pl.Date, "value": pl.Float64})
+
+    df = pl.DataFrame(
+        {"veiculo_id": [r[0] for r in rows],
+         "data": [r[1] for r in rows],
+         "value": [r[2] for r in rows]},
+    ).with_columns(pl.col("data").cast(pl.Date))
+
+    return df
+
+
+# ------------------------------------------------------------------
+# Processamento: alinhar séries recentes
+# ------------------------------------------------------------------
+
+
+def _align_recent_series(
+    df_daily: pl.DataFrame,
+    vehicle_ids: np.ndarray,
+    num_days: int,
+) -> Tuple[pl.DataFrame, np.ndarray, Dict[int, date]]:
+    """
+    Trunca ao último domingo e filtra veículos com série completa.
+
+    Returns
+    -------
+    df_recent : pl.DataFrame
+        Séries alinhadas (num_days registos por veículo)
+    valid_ids : np.ndarray
+        IDs dos veículos com série completa
+    last_dates : dict
+        {veiculo_id: última data (domingo)} por veículo válido
+    """
+    df = df_daily.filter(
+        pl.col("veiculo_id").is_in(vehicle_ids.tolist())
+    ).sort("veiculo_id", "data")
+
+    # Adicionar dia da semana (Polars: 1=seg, 7=dom)
+    df = df.with_columns(pl.col("data").dt.weekday().alias("_dow"))
+
+    # Truncar ao último domingo e pegar os últimos num_days
+    df_recent = (
+        df
+        .group_by("veiculo_id")
+        .map_groups(lambda g: (
+            g
+            .filter(pl.col("data") <= g["data"].filter(g["_dow"] == 7).last())
+            .tail(num_days)
+        ))
+        .drop("_dow")
+        .sort("veiculo_id", "data")
+    )
+
+    # Validar séries completas
+    counts = df_recent.group_by("veiculo_id").len()
+    valid_series = counts.filter(pl.col("len") == num_days)
+    valid_ids = valid_series["veiculo_id"].to_numpy()
+
+    # Filtrar para veículos válidos
+    df_recent = df_recent.filter(pl.col("veiculo_id").is_in(valid_ids.tolist()))
+
+    # Última data (domingo) por veículo
+    last_dates = dict(
+        df_recent
+        .group_by("veiculo_id")
+        .agg(pl.col("data").max().alias("last_date"))
+        .iter_rows()
+    )
+
+    return df_recent, valid_ids, last_dates
+
+
+# ------------------------------------------------------------------
+# Processamento: converter para DataInput e predizer
+# ------------------------------------------------------------------
+
+
+def _run_prediction_sync(
+    target: str,
+    df_profile: pd.DataFrame,
+    df_recent_pd: pd.DataFrame,
+    upper: np.ndarray,
+) -> Dict[str, np.ndarray]:
+    """Executa pipeline completo de predição (sync, para run_in_executor)."""
+    from api.config.dataset_config import DatasetConfig
+    from api.config.output_config import OutputConfig
+    from api.config.predictor_config import PredictorConfig
+    from api.config.training_config import TrainingConfig
+    from moviasai.data.dataset import GenerateDataInput
+    from moviasai.data.normalization import ProfileDatasetNormalizer
+    from moviasai.forecasting.predictor import ForecastingPredictor
+
+    dataset_cfg = DatasetConfig.from_yaml(_config_path("dataset_config.yaml"))
+    training_cfg = TrainingConfig.from_yaml(_config_path("training_config.yaml"))
+    output_cfg = OutputConfig.from_yaml(_config_path("output_config.yaml"))
+    predictor_cfg = PredictorConfig.from_yaml(_config_path("predictor_config.yaml"))
+
+    # Gerar DataInput
+    data_input = GenerateDataInput(
+        target=target,
+        df_profile=df_profile,
+        df_recent=df_recent_pd,
+        upper=upper,
+    ).generate()
+
+    # Normalizar
+    normalizer = ProfileDatasetNormalizer(
+        cv_max=training_cfg.normalization.cv_max,
+        ratio_max=training_cfg.normalization.ratio_max,
+    )
+    data_input_norm = normalizer.fit_normalize_data_input(data_input)
+
+    # Predição ONNX
+    predictor = ForecastingPredictor.from_config(
+        target=target,
+        predictor_cfg=predictor_cfg,
+        output_cfg=output_cfg,
+        horizon_weeks=dataset_cfg.horizon_weeks,
+    )
+    return predictor.predict(data_input_norm)
+
+
+def _compute_prediction_dates(
+    last_dates: Dict[int, date],
+    vehicle_ids: np.ndarray,
+    daily_horizon: int,
+    horizon_weeks,
+) -> Tuple[Dict[int, List[date]], Dict[int, List[Tuple[int, date, date]]]]:
+    """
+    Calcula datas para predições daily e heads a partir do último domingo.
+
+    Returns
+    -------
+    daily_dates : {veiculo_id: [d1, d2, ...]}
+    head_ranges : {veiculo_id: [(head_num, dt_inicio, dt_fim), ...]}
+    """
+    # Normalizar horizon_weeks
+    if isinstance(horizon_weeks, int):
+        head_weeks = [1] * horizon_weeks
+    else:
+        head_weeks = list(horizon_weeks)
+
+    daily_dates: Dict[int, List[date]] = {}
+    head_ranges: Dict[int, List[Tuple[int, date, date]]] = {}
+
+    for vid in vehicle_ids:
+        last_sunday = last_dates[vid]
+        start = last_sunday + timedelta(days=1)  # segunda-feira seguinte
+
+        # Daily: daily_horizon dias a partir de start
+        daily_dates[vid] = [start + timedelta(days=i) for i in range(daily_horizon)]
+
+        # Heads: cada head cobre N semanas consecutivas
+        heads = []
+        cursor = start
+        for h_idx, weeks in enumerate(head_weeks, start=1):
+            dt_inicio = cursor
+            dt_fim = cursor + timedelta(days=weeks * 7 - 1)
+            heads.append((h_idx, dt_inicio, dt_fim))
+            cursor = dt_fim + timedelta(days=1)
+        head_ranges[vid] = heads
+
+    return daily_dates, head_ranges
+
+
+# ------------------------------------------------------------------
+# DB: persistir predições
+# ------------------------------------------------------------------
+
+
+async def _persist_predictions(
+    session: AsyncSession,
+    target: str,
+    vehicle_ids: np.ndarray,
+    y_daily: np.ndarray,
+    y_heads: np.ndarray,
+    daily_dates: Dict[int, List[date]],
+    head_ranges: Dict[int, List[Tuple[int, date, date]]],
+) -> Tuple[int, int]:
+    """
+    Apaga predições futuras (a partir da data mínima das novas) e insere as novas.
+
+    Predições anteriores (cobertas por dados reais) são mantidas para backtest.
+
+    Returns (daily_count, head_count).
+    """
+    # Determinar a data de corte: menor data das novas predições daily
+    cutoff = min(dt for dates in daily_dates.values() for dt in dates)
+
+    # Apagar apenas predições a partir do corte (futuro)
+    await session.execute(
+        delete(PredictionDaily).where(
+            PredictionDaily.target == target,
+            PredictionDaily.data >= cutoff,
+        )
+    )
+    await session.execute(
+        delete(PredictionHead).where(
+            PredictionHead.target == target,
+            PredictionHead.dt_inicio >= cutoff,
+        )
+    )
+
+    # Bulk insert daily via core (skip NaN predictions)
+    daily_records = []
+    for i, vid in enumerate(vehicle_ids):
+        dates = daily_dates[vid]
+        for j, dt in enumerate(dates):
+            val = float(y_daily[i, j])
+            if val != val:  # NaN check
+                continue
+            daily_records.append({
+                "veiculo_id": int(vid),
+                "target": target,
+                "data": dt,
+                "prediction": val,
+            })
+
+    # Bulk insert heads via core (skip NaN predictions)
+    head_records = []
+    for i, vid in enumerate(vehicle_ids):
+        ranges = head_ranges[vid]
+        for j, (head_num, dt_inicio, dt_fim) in enumerate(ranges):
+            val = float(y_heads[i, j])
+            if val != val:  # NaN check
+                continue
+            head_records.append({
+                "veiculo_id": int(vid),
+                "target": target,
+                "head": head_num,
+                "dt_inicio": dt_inicio,
+                "dt_fim": dt_fim,
+                "prediction": val,
+            })
+
+    if daily_records:
+        await session.execute(insert(PredictionDaily), daily_records)
+    if head_records:
+        await session.execute(insert(PredictionHead), head_records)
+    await session.flush()
+
+    return len(daily_records), len(head_records)
+
+
+# ------------------------------------------------------------------
+# Helpers: verificar veículos não encontrados
+# ------------------------------------------------------------------
+
+
+async def _check_missing_vehicles(
+    session: AsyncSession,
+    requested_ids: List[int],
+    found_ids: set,
+    target: str,
+) -> List[Dict]:
+    """
+    Para cada veículo pedido mas não encontrado no perfil,
+    verifica nos metadados se foi excluído (e porquê).
+    """
+    quality_labels = {
+        0: "VALID",
+        1: "OUTLIER",
+        2: "NOT_MODELABLE",
+        3: "EMPTY",
+    }
+
+    missing_ids = [vid for vid in requested_ids if vid not in found_ids]
+    if not missing_ids:
+        return []
+
+    model_cls = VehicleMetadataKm if target == "km" else VehicleMetadataH
+    stmt = select(
+        model_cls.veiculo_id,
+        model_cls.quality,
+        model_cls.quality_reason,
+    ).where(model_cls.veiculo_id.in_(missing_ids))
+    result = await session.execute(stmt)
+    metadata_map = {r[0]: (r[1], r[2]) for r in result.all()}
+
+    not_found = []
+    for vid in missing_ids:
+        if vid in metadata_map:
+            quality, reason = metadata_map[vid]
+            label = quality_labels.get(quality, f"quality={quality}")
+            msg = f"Veículo excluído do perfil ({label})"
+            if reason:
+                msg += f": {reason}"
+            not_found.append({"veiculo_id": vid, "reason": msg})
         else:
-            predictor = Predictor(
-                model=models,
-                model_weights=weights,
-                history_size=self.config.history_size,
-                forecast_horizon=self.config.forecast_horizon,
-                max_steps=self.config.max_steps,
-                verbose=False
-            )
-            logger.info(
-                f"✅ Predictor criado (ensemble): "
-                f"category={category}, segment={segment}, "
-                f"models={[m.model_name for m in seg_config.models]}, "
-                f"weights={weights}"
-            )
-        
-        self._predictor_cache[cache_key] = predictor
-        
-        return predictor
-    
-    def _create_timeseries_from_profile(
-        self,
-        profile: Dict,
-        history_size: int
-    ) -> Tuple[TimeSeries, TimeSeries]:
-        """
-        Cria TimeSeries a partir do perfil do veículo
-        
-        Segue o mesmo padrão usado no treinamento:
-        1. Normalizar valores usando upper (percentil 99)
-        2. Static covariates (15 summary features)
-        3. TimeSeries principal com valores normalizados
-        4. Daily features (10 features × 7 dias = 70 features)
-        
-        Parameters
-        ----------
-        profile : Dict
-            Perfil completo do veículo (85 features + metadata)
-        history_size : int
-            Tamanho do histórico (últimos N dias)
-        
-        Returns
-        -------
-        tuple
-            (ts, ts_daily) onde:
-            - ts: TimeSeries principal (valores normalizados) com static covariates
-            - ts_daily: TimeSeries de daily features (past covariates)
-        
-        Raises
-        ------
-        ValueError
-            Se veículo não tiver samples suficientes
-        """
-        # Validar samples
-        samples = profile['samples']
-        if len(samples) < history_size:
-            raise ValueError(
-                f"Veículo {profile['vehicle_id']}: dados insuficientes. "
-                f"Necessário: {history_size}, disponível: {len(samples)}"
-            )
-        
-        # Extrair últimos history_size valores
-        values_raw = np.array(samples[-history_size:])
-        
-        # 1. NORMALIZAR (igual ao treinamento)
-        upper = profile['upper']
-        values_clipped = np.clip(values_raw, 0, upper)
-        max_value = max(values_clipped)
-        values_scaled = (
-            values_clipped / max_value if max_value > 0 else np.zeros_like(values_clipped)
-        ).reshape(-1, 1)
-        
-        # Criar índice temporal (últimos history_size dias)
-        last_date = pd.Timestamp(profile['samples_end_date'])
-        time_index = pd.date_range(
-            end=last_date,
-            periods=history_size,
-            freq='D'
-        )
-        
-        # 2. STATIC COVARIATES (15 summary features)
-        category = profile['category']
-        
-        segmentation_features = [
-            f'{category}_por_dia',
-            f'media_{category}',
-            f'max_{category}',
-            f'mediana_{category}',
-            f'std_{category}',
-            f'score_continuidade_{category}',
-            f'taxa_semanas_ativas_{category}',
-            f'taxa_dias_ativos_{category}',
-            f'cv_gaps_{category}',
-            f'gap_medio_{category}',
-            f'gap_max_{category}',
-            f'cv_{category}',
-            f'p25_{category}',
-            f'p75_{category}',
-            f'iqr_{category}'
-        ]
-        
-        static_cov_dict = {feat: profile[feat] for feat in segmentation_features}
-        static_cov = pd.DataFrame([static_cov_dict])
-        
-        # 3. TIMESERIES principal
-        target_col = f'{category}_dia_clean'
-        
-        ts = TimeSeries.from_times_and_values(
-            times=time_index,
-            values=values_scaled,
-            static_covariates=static_cov,
-            freq='D',
-            fill_missing_dates=False,
-            columns=[f'{target_col}_scaled']
-        )
-        
-        # 4. DAILY FEATURES (10 features por dia da semana)
-        weekday_base_features = [
-            'mean', 'std', 'median', 'max', 'min',
-            'p25', 'p75', 'iqr', 'prob_active', 'cv'
-        ]
-        
-        n_dates = len(time_index)
-        n_features = len(weekday_base_features)
-        daily_features_matrix = np.zeros((n_dates, n_features))
-        
-        # Obter dia da semana (1=segunda, 7=domingo)
-        weekdays = [date.weekday() + 1 for date in time_index]
-        
-        for i, weekday in enumerate(weekdays):
-            for j, feat in enumerate(weekday_base_features):
-                col_name = f'day_{weekday}_{feat}'
-                daily_features_matrix[i, j] = profile[col_name]
-        
-        # 5. TIMESERIES DAILY (past covariates)
-        ts_daily = TimeSeries.from_times_and_values(
-            times=time_index,
-            values=daily_features_matrix,
-            freq='D',
-            fill_missing_dates=False,
-            columns=weekday_base_features
-        )
-        
-        return ts, ts_daily
-    
-    async def predict_date_to_reach(
-        self,
-        vehicle_ids: List[int],
-        target_values: List[float],
-        n_jobs: int = 1
-    ) -> List[Dict]:
-        """
-        Prediz data para atingir valor acumulado
-        
-        Encontra a PRIMEIRA data em que o valor acumulado DAS PREDIÇÕES
-        ultrapassa o target_value. O acumulado é calculado APENAS sobre as
-        predições futuras, começando do zero.
-        
-        Parameters
-        ----------
-        vehicle_ids : List[int]
-            Lista de IDs de veículos
-        target_values : List[float]
-            Valores alvo (acumulado) para cada veículo
-        n_jobs : int, default=1
-            Número de threads para paralelização
-            - 1: sequencial
-            - -1: usar todos os CPUs disponíveis
-            - n > 1: usar n threads
-        
-        Returns
-        -------
-        List[Dict]
-            Lista com resultados:
-            - vehicle_id: int
-            - category: str
-            - segment: int
-            - target_value: float
-            - predicted_date: str (ISO format)
-            - n_steps: int (dias até atingir)
-            - accumulated_value: float (valor acumulado previsto)
-        
-        Raises
-        ------
-        ValueError
-            Se tamanhos de vehicle_ids e target_values não coincidirem
-        FileNotFoundError
-            Se modelo não for encontrado
-        
-        Examples
-        --------
-        >>> results = await service.predict_date_to_reach(
-        ...     vehicle_ids=[1316, 18230],
-        ...     target_values=[10000.0, 15000.0],
-        ...     n_jobs=-1
-        ... )
-        >>> print(f"Veículo 1316 atingirá 10.000 km em {results[0]['predicted_date']}")
-        """
-        if len(vehicle_ids) != len(target_values):
-            raise ValueError(
-                f"vehicle_ids e target_values devem ter mesmo tamanho "
-                f"({len(vehicle_ids)} != {len(target_values)})"
-            )
-        
-        logger.info(f"Iniciando predição date-to-reach para {len(vehicle_ids)} veículos")
-        
-        # Buscar perfis
-        profiles = await self.profile_service.get_profiles_batch(vehicle_ids)
-        
-        if not profiles:
-            logger.warning("Nenhum perfil encontrado")
-            return []
-        
-        # Agrupar por (category, segment)
-        groups: Dict[Tuple[str, int], List[Tuple[int, Dict, float]]] = {}
-        
-        for vid, target in zip(vehicle_ids, target_values):
-            if vid not in profiles:
-                logger.warning(f"Perfil não encontrado para veículo {vid}")
-                continue
-            
-            profile = profiles[vid]
-            key = (profile['category'], profile['segment'])
-            
-            if key not in groups:
-                groups[key] = []
-            
-            groups[key].append((vid, profile, target))
-        
-        # Processar cada grupo
-        all_results = []
-        
-        for (category, segment), group_data in groups.items():
-            logger.info(
-                f"Processando grupo: category={category}, segment={segment}, "
-                f"n_vehicles={len(group_data)}"
-            )
-            
-            # Obter predictor
-            try:
-                predictor = self._get_predictor(category, segment)
-            except (ValueError, FileNotFoundError) as e:
-                logger.error(f"Erro ao obter predictor para {category}-{segment}: {e}")
-                continue
-            
-            history_size = predictor.history_size
-            
-            # Criar TimeSeries para cada veículo do grupo
-            histories = []
-            past_covs = []
-            targets = []
-            vehicle_ids_group = []
-            
-            for vid, profile, target in group_data:
-                try:
-                    ts, ts_daily = self._create_timeseries_from_profile(
-                        profile,
-                        history_size
-                    )
-                    
-                    histories.append(ts)
-                    past_covs.append(ts_daily)
-                    targets.append(target)
-                    vehicle_ids_group.append(vid)
-                    
-                except ValueError as e:
-                    logger.warning(f"Veículo {vid}: {e}")
-                    continue
-            
-            if not histories:
-                logger.warning(f"Nenhuma série válida para category={category}, segment={segment}")
-                continue
-            
-            logger.info(f"Predizendo {len(histories)} séries com n_jobs={n_jobs}")
-            
-            # Predizer em lote
-            result = predictor.date_to_reach_accumulated(
-                history=histories,
-                target_value=targets,
-                past_covariates=past_covs if predictor.supports_past_covariates else None,
-                n_jobs=n_jobs
-            )
-            
-            # Formatar resultados
-            dates = result['date'] if isinstance(result['date'], list) else [result['date']]
-            n_steps_list = result['n_steps'] if isinstance(result['n_steps'], list) else [result['n_steps']]
-            paths = result['path'] if isinstance(result['path'], list) else [result['path']]
-            
-            for vid, date, n_steps, path in zip(vehicle_ids_group, dates, n_steps_list, paths):
-                accumulated = float(path.values()[:, 0].sum())
-                target_idx = vehicle_ids_group.index(vid)
-                
-                all_results.append({
-                    'vehicle_id': vid,
-                    'category': category,
-                    'segment': segment,
-                    'target_value': targets[target_idx],
-                    'predicted_date': date.isoformat(),
-                    'n_steps': n_steps,
-                    'accumulated_value': accumulated
-                })
-            
-            logger.info(f"✅ Grupo processado: {len(all_results)} resultados")
-        
-        logger.info(f"Predição date-to-reach concluída: {len(all_results)} resultados")
-        
-        return all_results
-    
-    async def predict_accumulated_at_step(
-        self,
-        vehicle_ids: List[int],
-        n_steps: Optional[List[int]] = None,
-        reference_dates: Optional[List[str]] = None,
-        n_jobs: int = 1
-    ) -> List[Dict]:
-        """
-        Prediz valor acumulado em uma data/step específico
-        
-        Calcula o valor acumulado DAS PREDIÇÕES em uma data de referência
-        ou após n_steps. O acumulado é calculado APENAS sobre as predições
-        futuras, começando do zero.
-        
-        Parameters
-        ----------
-        vehicle_ids : List[int]
-            Lista de IDs de veículos
-        n_steps : List[int], optional
-            Número de steps para cada veículo
-        reference_dates : List[str], optional
-            Datas de referência (ISO format) para cada veículo
-        n_jobs : int, default=1
-            Número de threads para paralelização
-        
-        Returns
-        -------
-        List[Dict]
-            Lista com resultados:
-            - vehicle_id: int
-            - category: str
-            - segment: int
-            - n_steps: int
-            - reference_date: str (ISO format)
-            - accumulated_value: float
-        
-        Raises
-        ------
-        ValueError
-            Se nem n_steps nem reference_dates forem fornecidos,
-            ou se tamanhos não coincidirem
-        
-        Examples
-        --------
-        >>> # Quanto vai acumular em 90 dias?
-        >>> results = await service.predict_accumulated_at_step(
-        ...     vehicle_ids=[1316, 18230],
-        ...     n_steps=[90, 90],
-        ...     n_jobs=-1
-        ... )
-        
-        >>> # Quanto vai acumular até 31/12/2024?
-        >>> results = await service.predict_accumulated_at_step(
-        ...     vehicle_ids=[1316],
-        ...     reference_dates=["2024-12-31"]
-        ... )
-        """
-        if n_steps is None and reference_dates is None:
-            raise ValueError("Deve fornecer n_steps ou reference_dates")
-        
-        n_vehicles = len(vehicle_ids)
-        
-        logger.info(f"Iniciando predição accumulated-at-step para {n_vehicles} veículos")
-        
-        # Normalizar n_steps
-        if n_steps is None:
-            n_steps_list = [None] * n_vehicles
-        elif isinstance(n_steps, int):
-            n_steps_list = [n_steps] * n_vehicles
-        else:
-            n_steps_list = n_steps
-            if len(n_steps_list) != n_vehicles:
-                raise ValueError(
-                    f"n_steps deve ter mesmo tamanho que vehicle_ids "
-                    f"({len(n_steps_list)} != {n_vehicles})"
+            not_found.append({
+                "veiculo_id": vid,
+                "reason": "Veículo não existe ou não tem atividade registrada",
+            })
+
+    return not_found
+
+
+# ------------------------------------------------------------------
+# API pública
+# ------------------------------------------------------------------
+
+
+async def predict(
+    target: str,
+    vehicle_ids: Optional[List[int]] = None,
+) -> Dict:
+    """
+    Executa predição para veículos do perfil.
+
+    Se ``vehicle_ids`` for None, prediz todos os veículos.
+    Retorna dict com daily, heads, type_probabilities e not_found.
+    """
+    from api.config.dataset_config import DatasetConfig
+
+    dataset_cfg = DatasetConfig.from_yaml(_config_path("dataset_config.yaml"))
+    num_days = dataset_cfg.num_weeks_recent * 7
+
+    async with session_context() as session:
+        # 1. Carregar perfis
+        df_profile = await _load_vehicle_profiles(session, target, vehicle_ids)
+        if df_profile.empty:
+            not_found = []
+            if vehicle_ids:
+                not_found = await _check_missing_vehicles(
+                    session, vehicle_ids, set(), target,
                 )
-        
-        # Normalizar reference_dates
-        if reference_dates is None:
-            ref_dates_list = [None] * n_vehicles
-        elif isinstance(reference_dates, str):
-            ref_dates_list = [pd.Timestamp(reference_dates)] * n_vehicles
-        else:
-            ref_dates_list = [pd.Timestamp(d) if d else None for d in reference_dates]
-            if len(ref_dates_list) != n_vehicles:
-                raise ValueError(
-                    f"reference_dates deve ter mesmo tamanho que vehicle_ids "
-                    f"({len(ref_dates_list)} != {n_vehicles})"
-                )
-        
-        # Buscar perfis
-        profiles = await self.profile_service.get_profiles_batch(vehicle_ids)
-        
-        if not profiles:
-            logger.warning("Nenhum perfil encontrado")
-            return []
-        
-        # Agrupar por (category, segment)
-        groups: Dict[Tuple[str, int], List] = {}
-        
-        for i, vid in enumerate(vehicle_ids):
-            if vid not in profiles:
-                logger.warning(f"Perfil não encontrado para veículo {vid}")
-                continue
-            
-            profile = profiles[vid]
-            key = (profile['category'], profile['segment'])
-            
-            if key not in groups:
-                groups[key] = []
-            
-            groups[key].append((vid, profile, n_steps_list[i], ref_dates_list[i]))
-        
-        # Processar cada grupo
-        all_results = []
-        
-        for (category, segment), group_data in groups.items():
-            logger.info(
-                f"Processando grupo: category={category}, segment={segment}, "
-                f"n_vehicles={len(group_data)}"
-            )
-            
-            # Obter predictor
-            try:
-                predictor = self._get_predictor(category, segment)
-            except (ValueError, FileNotFoundError) as e:
-                logger.error(f"Erro ao obter predictor para {category}-{segment}: {e}")
-                continue
-            
-            history_size = predictor.history_size
-            
-            # Criar TimeSeries
-            histories = []
-            past_covs = []
-            n_steps_group = []
-            ref_dates_group = []
-            vehicle_ids_group = []
-            
-            for vid, profile, n_step, ref_date in group_data:
-                try:
-                    ts, ts_daily = self._create_timeseries_from_profile(
-                        profile,
-                        history_size
-                    )
-                    
-                    histories.append(ts)
-                    past_covs.append(ts_daily)
-                    n_steps_group.append(n_step)
-                    ref_dates_group.append(ref_date)
-                    vehicle_ids_group.append(vid)
-                    
-                except ValueError as e:
-                    logger.warning(f"Veículo {vid}: {e}")
-                    continue
-            
-            if not histories:
-                logger.warning(f"Nenhuma série válida para category={category}, segment={segment}")
-                continue
-            
-            logger.info(f"Predizendo {len(histories)} séries com n_jobs={n_jobs}")
-            
-            # Predizer em lote
-            result = predictor.predict_accumulated_at_step(
-                history=histories,
-                n_steps=n_steps_group if any(s is not None for s in n_steps_group) else None,
-                reference_date=ref_dates_group if any(d is not None for d in ref_dates_group) else None,
-                past_covariates=past_covs if predictor.supports_past_covariates else None,
-                n_jobs=n_jobs
-            )
-            
-            # Formatar resultados
-            accumulated_values = (
-                result['accumulated_value'] 
-                if isinstance(result['accumulated_value'], list) 
-                else [result['accumulated_value']]
-            )
-            paths = result['path'] if isinstance(result['path'], list) else [result['path']]
-            
-            for i, (vid, acc_value, path) in enumerate(zip(vehicle_ids_group, accumulated_values, paths)):
-                # Determinar n_steps e reference_date finais
-                final_n_steps = n_steps_group[i] if n_steps_group[i] is not None else len(path)
-                
-                if ref_dates_group[i] is not None:
-                    final_ref_date = ref_dates_group[i]
-                else:
-                    last_date = pd.Timestamp(profiles[vid]['samples_end_date'])
-                    final_ref_date = last_date + pd.Timedelta(days=final_n_steps)
-                
-                all_results.append({
-                    'vehicle_id': vid,
-                    'category': category,
-                    'segment': segment,
-                    'n_steps': final_n_steps,
-                    'reference_date': final_ref_date.isoformat(),
-                    'accumulated_value': float(acc_value)
+            return {
+                "target": target,
+                "predictions_daily": [],
+                "predictions_heads": [],
+                "type_probabilities": [],
+                "not_found": not_found,
+            }
+
+        profile_vehicle_ids = df_profile["veiculo_id"].values
+
+        # 2. Carregar metadados (upper)
+        meta = await _load_metadata(session, target, profile_vehicle_ids.tolist())
+        upper_map = meta.set_index("veiculo_id")["upper"]
+        upper = upper_map.reindex(profile_vehicle_ids).values.astype(np.float64)
+
+        # 3. Carregar atividade diária
+        df_daily = await _load_daily_activity(
+            session, target, profile_vehicle_ids.tolist(), num_days,
+        )
+
+        # 4. Alinhar séries recentes
+        df_recent, valid_ids, last_dates = _align_recent_series(
+            df_daily, profile_vehicle_ids, num_days,
+        )
+
+        n_dropped = len(profile_vehicle_ids) - len(valid_ids)
+        if n_dropped > 0:
+            logger.warning(f"[{target}] {n_dropped} veículos descartados (série < {num_days} dias)")
+
+        # Filtrar profile e upper para veículos válidos
+        mask = np.isin(profile_vehicle_ids, valid_ids)
+        df_profile = df_profile[mask].reset_index(drop=True)
+        upper = upper[mask]
+        profile_vehicle_ids = df_profile["veiculo_id"].values
+
+        # Converter df_recent para pandas (renomear value → {target}_dia_clean)
+        df_recent_pd = df_recent.to_pandas()
+        df_recent_pd["data"] = pd.to_datetime(df_recent_pd["data"])
+        df_recent_pd = df_recent_pd.rename(columns={"value": f"{target}_dia_clean"})
+
+        # 5. Predição (CPU-bound → executor)
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(
+            None,
+            _run_prediction_sync,
+            target, df_profile, df_recent_pd, upper,
+        )
+
+        y_daily = results["y_daily"]
+        y_heads = results["y_heads"]
+
+        # 6. Calcular datas
+        daily_dates, head_ranges = _compute_prediction_dates(
+            last_dates, profile_vehicle_ids,
+            dataset_cfg.daily_horizon, dataset_cfg.horizon_weeks,
+        )
+
+        # 7. Montar resposta daily
+        pred_daily = []
+        for i, vid in enumerate(profile_vehicle_ids):
+            dates = daily_dates[int(vid)]
+            for j, dt in enumerate(dates):
+                pred_daily.append({
+                    "veiculo_id": int(vid),
+                    "data": dt,
+                    "prediction": float(y_daily[i, j]),
                 })
-            
-            logger.info(f"✅ Grupo processado: {len(all_results)} resultados")
-        
-        logger.info(f"Predição accumulated-at-step concluída: {len(all_results)} resultados")
-        
-        return all_results
-    
-    def get_cache_stats(self) -> Dict[str, int]:
-        """
-        Retorna estatísticas do cache
-        
-        Returns
-        -------
-        dict
-            - models_loaded: número de modelos em cache
-            - predictors_cached: número de predictors em cache
-        """
+
+        # 8. Montar resposta heads
+        pred_heads = []
+        for i, vid in enumerate(profile_vehicle_ids):
+            ranges = head_ranges[int(vid)]
+            for j, (head_num, dt_inicio, dt_fim) in enumerate(ranges):
+                pred_heads.append({
+                    "veiculo_id": int(vid),
+                    "head": head_num,
+                    "dt_inicio": dt_inicio,
+                    "dt_fim": dt_fim,
+                    "prediction": float(y_heads[i, j]),
+                })
+
+        # 9. Probabilidades de tipo
+        type_probs = await _load_type_probabilities(
+            session, profile_vehicle_ids.tolist(),
+        )
+        type_probs_list = [
+            {"veiculo_id": int(vid), "probabilities": type_probs.get(int(vid), {})}
+            for vid in profile_vehicle_ids
+        ]
+
+        # 10. Veículos não encontrados
+        not_found = []
+        if vehicle_ids:
+            not_found = await _check_missing_vehicles(
+                session, vehicle_ids, set(profile_vehicle_ids.tolist()), target,
+            )
+
+    return {
+        "target": target,
+        "predictions_daily": pred_daily,
+        "predictions_heads": pred_heads,
+        "type_probabilities": type_probs_list,
+        "not_found": not_found,
+    }
+
+
+async def predict_and_persist_with_session(
+    session: AsyncSession,
+    target: str,
+) -> Dict:
+    """
+    Executa predição para todos os veículos do perfil e persiste resultados.
+
+    Usa a sessão fornecida (sem commit) — o chamador controla a transação.
+    """
+    from api.config.dataset_config import DatasetConfig
+
+    dataset_cfg = DatasetConfig.from_yaml(_config_path("dataset_config.yaml"))
+    num_days = dataset_cfg.num_weeks_recent * 7
+
+    # 1. Carregar todos os perfis
+    df_profile = await _load_vehicle_profiles(session, target)
+    if df_profile.empty:
         return {
-            'models_loaded': len(self._model_cache),
-            'predictors_cached': len(self._predictor_cache)
+            "target": target,
+            "total_vehicles": 0,
+            "daily_rows_persisted": 0,
+            "head_rows_persisted": 0,
         }
-    
-    def clear_cache(self):
-        """Limpa cache de modelos e predictors"""
-        self._model_cache.clear()
-        self._predictor_cache.clear()
-        logger.info("Cache limpo")
-    
-    def warmup_cache(self):
-        """
-        Pré-carrega todos os modelos configurados
-        
-        Útil para inicialização do serviço.
-        """
-        logger.info("Iniciando warmup do cache...")
-        
-        loaded = []
-        failed = []
-        
-        for cat_config in self.config.categories:
-            for seg_config in cat_config.segments:
-                try:
-                    # Criar predictor (que carrega os modelos)
-                    predictor = self._get_predictor(
-                        cat_config.category,
-                        seg_config.segment
-                    )
-                    
-                    loaded.append(f"{cat_config.category}_{seg_config.segment}")
-                    
-                except Exception as e:
-                    failed.append(f"{cat_config.category}_{seg_config.segment}: {e}")
-                    logger.error(
-                        f"Erro ao carregar predictor {cat_config.category}_{seg_config.segment}: {e}"
-                    )
-        
-        logger.info(f"✅ Warmup concluído: {len(loaded)} predictors carregados")
-        
-        if failed:
-            logger.warning(f"⚠️  {len(failed)} predictors falharam")
-        
-        return {'loaded': loaded, 'failed': failed}
 
-    async def predict_date_to_reach_with_profiles(
-        self,
-        vehicle_ids: List[int],
-        profiles: Dict[int, Dict],
-        target_values: List[float],
-        n_jobs: int = 1
-    ) -> List[Dict]:
-        """
-        Versão interna que aceita perfis customizados
-        
-        Usado pelo EvaluationService para evitar buscar do banco
-        """
-        if len(vehicle_ids) != len(target_values):
-            raise ValueError(
-                f"vehicle_ids e target_values devem ter mesmo tamanho "
-                f"({len(vehicle_ids)} != {len(target_values)})"
-            )
-        
-        logger.info(f"Iniciando predição date-to-reach para {len(vehicle_ids)} veículos (com perfis customizados)")
-        
-        # Agrupar por (category, segment)
-        groups: Dict[Tuple[str, int], List[Tuple[int, Dict, float]]] = {}
-        
-        for vid, target in zip(vehicle_ids, target_values):
-            if vid not in profiles:
-                logger.warning(f"Perfil não encontrado para veículo {vid}")
-                continue
-            
-            profile = profiles[vid]
-            key = (profile['category'], profile['segment'])
-            
-            if key not in groups:
-                groups[key] = []
-            
-            groups[key].append((vid, profile, target))
-        
-        # Processar cada grupo (mesmo código do método original)
-        all_results = []
-        
-        for (category, segment), group_data in groups.items():
-            logger.info(
-                f"Processando grupo: category={category}, segment={segment}, "
-                f"n_vehicles={len(group_data)}"
-            )
-            
-            try:
-                predictor = self._get_predictor(category, segment)
-            except (ValueError, FileNotFoundError) as e:
-                logger.error(f"Erro ao obter predictor para {category}-{segment}: {e}")
-                continue
-            
-            history_size = predictor.history_size
-            
-            # Criar TimeSeries
-            histories = []
-            past_covs = []
-            targets = []
-            vehicle_ids_group = []
-            
-            for vid, profile, target in group_data:
-                try:
-                    ts, ts_daily = self._create_timeseries_from_profile(
-                        profile,
-                        history_size
-                    )
-                    
-                    histories.append(ts)
-                    past_covs.append(ts_daily)
-                    targets.append(target)
-                    vehicle_ids_group.append(vid)
-                    
-                except ValueError as e:
-                    logger.warning(f"Veículo {vid}: {e}")
-                    continue
-            
-            if not histories:
-                logger.warning(f"Nenhuma série válida para category={category}, segment={segment}")
-                continue
-            
-            logger.info(f"Predizendo {len(histories)} séries com n_jobs={n_jobs}")
-            
-            # Predizer em lote
-            result = predictor.date_to_reach_accumulated(
-                history=histories,
-                target_value=targets,
-                past_covariates=past_covs if predictor.supports_past_covariates else None,
-                n_jobs=n_jobs
-            )
-            
-            # Formatar resultados
-            dates = result['date'] if isinstance(result['date'], list) else [result['date']]
-            n_steps_list = result['n_steps'] if isinstance(result['n_steps'], list) else [result['n_steps']]
-            paths = result['path'] if isinstance(result['path'], list) else [result['path']]
-            
-            for vid, date, n_steps, path in zip(vehicle_ids_group, dates, n_steps_list, paths):
-                accumulated = float(path.values()[:, 0].sum())
-                target_idx = vehicle_ids_group.index(vid)
-                
-                all_results.append({
-                    'vehicle_id': vid,
-                    'category': category,
-                    'segment': segment,
-                    'target_value': targets[target_idx],
-                    'predicted_date': date.isoformat(),
-                    'n_steps': n_steps,
-                    'accumulated_value': accumulated
-                })
-            
-            logger.info(f"✅ Grupo processado: {len(all_results)} resultados")
-        
-        logger.info(f"Predição date-to-reach concluída: {len(all_results)} resultados")
-        
-        return all_results
+    profile_vehicle_ids = df_profile["veiculo_id"].values
+
+    # 2. Metadados
+    meta = await _load_metadata(session, target, profile_vehicle_ids.tolist())
+    upper_map = meta.set_index("veiculo_id")["upper"]
+    upper = upper_map.reindex(profile_vehicle_ids).values.astype(np.float64)
+
+    # 3. Atividade diária
+    df_daily = await _load_daily_activity(
+        session, target, profile_vehicle_ids.tolist(), num_days,
+    )
+
+    # 4. Alinhar séries recentes
+    df_recent, valid_ids, last_dates = _align_recent_series(
+        df_daily, profile_vehicle_ids, num_days,
+    )
+
+    n_dropped = len(profile_vehicle_ids) - len(valid_ids)
+    if n_dropped > 0:
+        logger.warning(f"[{target}] {n_dropped} veículos descartados (série < {num_days} dias)")
+
+    # Filtrar
+    mask = np.isin(profile_vehicle_ids, valid_ids)
+    df_profile = df_profile[mask].reset_index(drop=True)
+    upper = upper[mask]
+    profile_vehicle_ids = df_profile["veiculo_id"].values
+
+    # Converter df_recent para pandas
+    df_recent_pd = df_recent.to_pandas()
+    df_recent_pd["data"] = pd.to_datetime(df_recent_pd["data"])
+    df_recent_pd = df_recent_pd.rename(columns={"value": f"{target}_dia_clean"})
+
+    # 5. Predição
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(
+        None,
+        _run_prediction_sync,
+        target, df_profile, df_recent_pd, upper,
+    )
+
+    y_daily = results["y_daily"]
+    y_heads = results["y_heads"]
+
+    # 6. Calcular datas
+    daily_dates, head_ranges = _compute_prediction_dates(
+        last_dates, profile_vehicle_ids,
+        dataset_cfg.daily_horizon, dataset_cfg.horizon_weeks,
+    )
+
+    # 7. Persistir (flush, sem commit)
+    daily_count, head_count = await _persist_predictions(
+        session, target,
+        profile_vehicle_ids, y_daily, y_heads,
+        daily_dates, head_ranges,
+    )
+
+    logger.info(
+        f"[{target}] Predições persistidas: "
+        f"{daily_count} daily, {head_count} heads "
+        f"para {len(profile_vehicle_ids)} veículos"
+    )
+
+    return {
+        "target": target,
+        "total_vehicles": int(len(profile_vehicle_ids)),
+        "daily_rows_persisted": daily_count,
+        "head_rows_persisted": head_count,
+    }
 
 
-    async def predict_accumulated_at_step_with_profiles(
-        self,
-        vehicle_ids: List[int],
-        profiles: Dict[int, Dict],
-        n_steps: Optional[List[int]] = None,
-        reference_dates: Optional[List[str]] = None,
-        n_jobs: int = 1
-    ) -> List[Dict]:
-        """
-        Versão interna que aceita perfis customizados
-        
-        Usado pelo EvaluationService para evitar buscar do banco
-        """
-        if n_steps is None and reference_dates is None:
-            raise ValueError("Deve fornecer n_steps ou reference_dates")
-        
-        n_vehicles = len(vehicle_ids)
-        
-        logger.info(f"Iniciando predição accumulated-at-step para {n_vehicles} veículos (com perfis customizados)")
-        
-        # Normalizar n_steps
-        if n_steps is None:
-            n_steps_list = [None] * n_vehicles
-        elif isinstance(n_steps, int):
-            n_steps_list = [n_steps] * n_vehicles
-        else:
-            n_steps_list = n_steps
-            if len(n_steps_list) != n_vehicles:
-                raise ValueError(
-                    f"n_steps deve ter mesmo tamanho que vehicle_ids "
-                    f"({len(n_steps_list)} != {n_vehicles})"
-                )
-        
-        # Normalizar reference_dates
-        if reference_dates is None:
-            ref_dates_list = [None] * n_vehicles
-        elif isinstance(reference_dates, str):
-            ref_dates_list = [pd.Timestamp(reference_dates)] * n_vehicles
-        else:
-            ref_dates_list = [pd.Timestamp(d) if d else None for d in reference_dates]
-            if len(ref_dates_list) != n_vehicles:
-                raise ValueError(
-                    f"reference_dates deve ter mesmo tamanho que vehicle_ids "
-                    f"({len(ref_dates_list)} != {n_vehicles})"
-                )
-        
-        # Agrupar por (category, segment)
-        groups: Dict[Tuple[str, int], List] = {}
-        
-        for i, vid in enumerate(vehicle_ids):
-            if vid not in profiles:
-                logger.warning(f"Perfil não encontrado para veículo {vid}")
-                continue
-            
-            profile = profiles[vid]
-            key = (profile['category'], profile['segment'])
-            
-            if key not in groups:
-                groups[key] = []
-            
-            groups[key].append((vid, profile, n_steps_list[i], ref_dates_list[i]))
-        
-        # Processar cada grupo (mesmo código do método original)
-        all_results = []
-        
-        for (category, segment), group_data in groups.items():
-            logger.info(
-                f"Processando grupo: category={category}, segment={segment}, "
-                f"n_vehicles={len(group_data)}"
+async def predict_and_persist(target: str) -> Dict:
+    """
+    Executa predição para todos os veículos do perfil e persiste resultados.
+
+    Atualiza as tabelas predictions_daily e predictions_heads.
+    """
+    async with session_context() as session:
+        result = await predict_and_persist_with_session(session, target)
+        await session.commit()
+    return result
+
+
+async def backtest(veiculo_id: int, target: str) -> Optional[Dict]:
+    """
+    Compara predições persistidas com valores reais de daily_activity.
+
+    Returns None se não houver predições para o veículo.
+    """
+    target_col = "km" if target == "km" else "h"
+
+    async with session_context() as session:
+        # 1. Carregar predições daily
+        result = await session.execute(
+            select(PredictionDaily.data, PredictionDaily.prediction)
+            .where(
+                PredictionDaily.veiculo_id == veiculo_id,
+                PredictionDaily.target == target,
             )
-            
-            try:
-                predictor = self._get_predictor(category, segment)
-            except (ValueError, FileNotFoundError) as e:
-                logger.error(f"Erro ao obter predictor para {category}-{segment}: {e}")
-                continue
-            
-            history_size = predictor.history_size
-            
-            # Criar TimeSeries
-            histories = []
-            past_covs = []
-            n_steps_group = []
-            ref_dates_group = []
-            vehicle_ids_group = []
-            
-            for vid, profile, n_step, ref_date in group_data:
-                try:
-                    ts, ts_daily = self._create_timeseries_from_profile(
-                        profile,
-                        history_size
-                    )
-                    
-                    histories.append(ts)
-                    past_covs.append(ts_daily)
-                    n_steps_group.append(n_step)
-                    ref_dates_group.append(ref_date)
-                    vehicle_ids_group.append(vid)
-                    
-                except ValueError as e:
-                    logger.warning(f"Veículo {vid}: {e}")
-                    continue
-            
-            if not histories:
-                logger.warning(f"Nenhuma série válida para category={category}, segment={segment}")
-                continue
-            
-            logger.info(f"Predizendo {len(histories)} séries com n_jobs={n_jobs}")
-            
-            # Predizer em lote
-            result = predictor.predict_accumulated_at_step(
-                history=histories,
-                n_steps=n_steps_group if any(s is not None for s in n_steps_group) else None,
-                reference_date=ref_dates_group if any(d is not None for d in ref_dates_group) else None,
-                past_covariates=past_covs if predictor.supports_past_covariates else None,
-                n_jobs=n_jobs
+            .order_by(PredictionDaily.data)
+        )
+        pred_daily_rows = result.all()
+
+        # 2. Carregar predições heads
+        result = await session.execute(
+            select(
+                PredictionHead.head,
+                PredictionHead.dt_inicio,
+                PredictionHead.dt_fim,
+                PredictionHead.prediction,
             )
-            
-            # Formatar resultados
-            accumulated_values = (
-                result['accumulated_value'] 
-                if isinstance(result['accumulated_value'], list) 
-                else [result['accumulated_value']]
+            .where(
+                PredictionHead.veiculo_id == veiculo_id,
+                PredictionHead.target == target,
             )
-            paths = result['path'] if isinstance(result['path'], list) else [result['path']]
-            
-            for i, (vid, acc_value, path) in enumerate(zip(vehicle_ids_group, accumulated_values, paths)):
-                final_n_steps = n_steps_group[i] if n_steps_group[i] is not None else len(path)
-                
-                if ref_dates_group[i] is not None:
-                    final_ref_date = ref_dates_group[i]
-                else:
-                    last_date = pd.Timestamp(profiles[vid]['samples_end_date'])
-                    final_ref_date = last_date + pd.Timedelta(days=final_n_steps)
-                
-                all_results.append({
-                    'vehicle_id': vid,
-                    'category': category,
-                    'segment': segment,
-                    'n_steps': final_n_steps,
-                    'reference_date': final_ref_date.isoformat(),
-                    'accumulated_value': float(acc_value)
-                })
-            
-            logger.info(f"✅ Grupo processado: {len(all_results)} resultados")
-        
-        logger.info(f"Predição accumulated-at-step concluída: {len(all_results)} resultados")
-        
-        return all_results
+            .order_by(PredictionHead.head)
+        )
+        pred_head_rows = result.all()
+
+        if not pred_daily_rows and not pred_head_rows:
+            return None
+
+        # 3. Determinar range de datas necessário
+        all_dates = [r[0] for r in pred_daily_rows]
+        for _, dt_inicio, dt_fim, _ in pred_head_rows:
+            all_dates.extend([dt_inicio, dt_fim])
+
+        if not all_dates:
+            return None
+
+        min_date = min(all_dates)
+        max_date = max(all_dates)
+
+        # 4. Carregar valores reais do daily_activity
+        result = await session.execute(
+            select(DailyActivity.data, getattr(DailyActivity, target_col))
+            .where(
+                DailyActivity.veiculo_id == veiculo_id,
+                DailyActivity.data >= min_date,
+                DailyActivity.data <= max_date,
+            )
+            .order_by(DailyActivity.data)
+        )
+        actual_map = {r[0]: r[1] for r in result.all()}
+
+        # 5. Montar comparação daily
+        daily_comparison = []
+        for dt, predicted in pred_daily_rows:
+            daily_comparison.append({
+                "data": dt,
+                "actual": actual_map.get(dt, 0.0),
+                "predicted": predicted,
+            })
+
+        # 6. Montar comparação heads (soma dos valores reais no intervalo)
+        heads_comparison = []
+        for head_num, dt_inicio, dt_fim, predicted in pred_head_rows:
+            actual_sum = sum(
+                val for d, val in actual_map.items()
+                if dt_inicio <= d <= dt_fim
+            )
+            heads_comparison.append({
+                "head": head_num,
+                "dt_inicio": dt_inicio,
+                "dt_fim": dt_fim,
+                "actual": actual_sum,
+                "predicted": predicted,
+            })
+
+    return {
+        "veiculo_id": veiculo_id,
+        "target": target,
+        "daily": daily_comparison,
+        "heads": heads_comparison,
+    }

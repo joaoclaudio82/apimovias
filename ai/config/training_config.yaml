@@ -1,53 +1,50 @@
+# config/training_config.yaml
+
 # ============================================================
-# CONFIGURAÇÃO DE TREINAMENTO DE MODELOS
+# CONFIGURAÇÃO DE TREINAMENTO (normalização + split)
 # ============================================================
 
-# Diretórios
-windows_dir: "../datasets/windows"
-profile_dir: "../datasets/profile"
-work_dir: "../models/output"
-cache_dir: "./datasets/.cache"
+# ---- Normalização (ProfileDatasetNormalizer) ----
+normalization:
+  cv_max: 5.0                 # Limite de clip para CV antes de log1p
+  ratio_max: 5.0              # Limite de clip para razões antes de log1p
 
-# Seed para reprodutibilidade
+# ---- Split temporal (treino / validação / teste) ----
+split:
+  val_size: 0.15              # Fração para validação (0.0 para desativar)
+  test_size: 0.15             # Fração para teste (0.0 para desativar)
+  shuffle: false               # Shuffle dentro de cada subset
+  random_state: 13            # Seed para reprodutibilidade do shuffle
+
+# Seed global para reprodutibilidade
 seed: 13
 
-# Métrica de avaliação
-eval_metric: "wmape"
+# ---- DataModule (ForecastingDataModule) ----
+data:
+  batch_size: 64
+  num_workers: 0
 
-# Configuração de treinamento
-training:
-  # Modelos a treinar
-  models:
-    # Modelos PyTorch
-    pytorch:
-      enabled: true
-      models:
-        - DLinear
-        - NLinear
-        - TSMixerModel
-        - TCN
-        - NBEATS
-        - NHiTS
-      
-      # Configurações específicas PyTorch
-      likelihood: false
-      incremental: false
-      force_reset: true
-      load_best: true
-      n_epochs: 100
-      batch_size: 64
-    
-    # Modelos Globais (não-PyTorch)
-    global:
-      enabled: true
-      models:
-        - LightGBM
-        - XGBModel
-        - LinearRegression
-      
-      # Configurações específicas Global
-      stride: 7
-# Configurações gerais
-  verbose_training: true
-  save_models: true
-  save_results: true
+# ---- Trainer (PyTorch Lightning) ----
+trainer:
+  max_epochs: 100
+  accelerator: auto
+  precision: 32
+  gradient_clip_val: 1.0
+
+  # Early stopping
+  early_stopping:
+    monitor: val_loss
+    patience: 10
+    min_delta: 1.0e-10
+
+  # Model checkpoint (melhor modelo por val_loss)
+  checkpoint:
+    monitor: val_loss
+    save_top_k: 1
+    mode: min
+
+# ---- Exportação ONNX ----
+onnx:
+  enabled: true
+  opset_version: 18
+  verify: true

@@ -1,35 +1,65 @@
 # config/vehicle_profile_config.yaml
 
 # ============================================================
-# CONFIGURAÇÃO DE PERFIS DE VEÍCULOS
+# CONFIGURAÇÃO DO VEHICLE PROFILE
 # ============================================================
+# Perfil semanal de veículos: features + classificação + versionamento
 
-# Path do arquivo de importação de dados
-input_data: "../datasets/full/telemetria_movias2025_features.csv"
+# ---- Features por extractor (por métrica) ----
+features:
+  km:
+    seg:
+      - cv_gaps
+      - taxa_dias_ativos
+      - p75
+      - iqr
+    day:
+      - mean
+      - std
+      - p25
+      - p75
+      - iqr
+      - prob_active
+      - cv
+    phase:
+      - prob_active
+      - mean
+      - p75
+      - iqr
+      - cv
+    cycle:
+      - prob_active
+      - mean
+      - ratio_fim_inicio
 
-# Parâmetros de geração de perfis
+  h:
+    seg:
+      - cv_gaps
+      - taxa_dias_ativos
+      - p75
+      - iqr
+    day:
+      - mean
+      - std
+      - p25
+      - p75
+      - iqr
+      - prob_active
+      - cv
+    phase:
+      - prob_active
+      - mean
+      - p75
+      - iqr
+      - cv
+    cycle:
+      - prob_active
+      - mean
+      - ratio_fim_inicio
+
+# ---- Parâmetros do VehicleProfile ----
 profile:
-  sample_size: 364  # Tamanho do histórico de amostras
-  p_upper: 99       # Percentil para upper bound
-  n_jobs: 4         # Paralelização (n_jobs threads)
-
-# Parâmetros de classificação
-classification:
-  # Modelos de classificação
-  models:
-    stage1_type: "../models/classification/stage1/stage1_type_BEST.pkl"
-    stage2_displacement: "../models/classification/stage2/stage2_displacement_BEST.pkl"
-    stage2_machine: "../models/classification/stage2/stage2_machine_BEST.pkl"
-  
-  # Requisitos mínimos
-  min_days: 35  # tamanho mínimo de dias do perfil
-
-# Mapeamento de classes
-mapping:
-  category:
-    0: "h"
-    1: "km"
-  
-  segments:
-    km: 3
-    h: 3
+  sample_size: 168            # Número máximo de amostras (7 dias * 4 semanas * 6 meses)
+  p_upper: 95                 # Percentil superior para clipping
+  n_jobs: 4                   # Threads paralelas
+  batch_size: 10              # Tamanho do lote

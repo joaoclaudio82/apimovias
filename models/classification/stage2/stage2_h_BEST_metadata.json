@@ -1,0 +1,18 @@
+{
+  "name": "stage2_h",
+  "n_samples": 1152,
+  "n_features": 5,
+  "n_classes": 2,
+  "feature_names": [
+    "seg_gap_medio_h",
+    "seg_cv_gaps_h",
+    "seg_taxa_dias_ativos_h",
+    "seg_p75_h",
+    "seg_iqr_h"
+  ],
+  "classes": [
+    0,
+    1
+  ],
+  "timestamp": "2026-04-26T01:08:24.528362"
+}

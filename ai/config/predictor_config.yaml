@@ -1,64 +1,11 @@
 # config/predictor_config.yaml
 
 # ============================================================
-# CONFIGURAÇÃO GLOBAL DO SISTEMA DE PREDIÇÃO
+# CONFIGURAÇÃO DO PREDICTOR
 # ============================================================
+# Define quais modelos ONNX serão utilizados para predição de cada métrica.
+# Os caminhos são relativos ao diretório models.forecasting do output_config.
 
-# Diretório raiz onde estão os modelos treinados
-models_root_dir: "../models/ts"
-
-# Parâmetros globais de predição (aplicados a todos os modelos)
-history_size: 28          # Tamanho do histórico (dias)
-forecast_horizon: 7       # Horizonte de previsão (dias)
-max_steps: 28           # Máximo de steps para predição autoregressiva
-
-# ============================================================
-# CONFIGURAÇÕES POR CATEGORIA E SEGMENTO
-# ============================================================
-
-categories:
-  # ----------------------------------------------------------
-  # CATEGORIA: KM (Quilometragem)
-  # ----------------------------------------------------------
-  - category: km
-    segments:
-      # Segmento 0: Veículos de baixa quilometragem
-      - segment: 0
-        models:
-          - model_name: LinearRegressionModel
-            weight: 1.0
-      
-      # Segmento 1: Veículos de média quilometragem
-      - segment: 1
-        models:
-          - model_name: LinearRegressionModel
-            weight: 1.0
-      
-      # Segmento 2: Veículos de alta quilometragem
-      - segment: 2
-        models:
-          - model_name: LinearRegressionModel
-            weight: 1.0
-  
-  # ----------------------------------------------------------
-  # CATEGORIA: H (Horas de Operação)
-  # ----------------------------------------------------------
-  - category: h
-    segments:
-      # Segmento 0: Equipamentos de baixa utilização
-      - segment: 0
-        models:
-          - model_name: XGBModel
-            weight: 1.0
-      
-      # Segmento 1: Equipamentos de média utilização
-      - segment: 1
-        models:
-          - model_name: LightGBMModel
-            weight: 1.0
-      
-      # Segmento 2: Equipamentos de alta utilização
-      - segment: 2
-        models:
-          - model_name: LinearRegressionModel
-            weight: 1.0
+models:
+  km: "forecasting_moe_km.onnx"
+  h: "forecasting_moe_h.onnx"

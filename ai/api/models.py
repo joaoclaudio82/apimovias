@@ -1,174 +1,175 @@
 # api/models.py
 
-from datetime import datetime, date, timedelta
+from datetime import date, datetime
 from enum import Enum
-import json
+from typing import Optional
 
-from sqlalchemy import func, Index, CheckConstraint, Text, ForeignKey
+from sqlalchemy import Float, String, UniqueConstraint, func, Index, Text
 from sqlalchemy.orm import Mapped, mapped_column, registry
-from sqlalchemy.types import TypeDecorator
 
 table_registry = registry()
 
 
-class FloatArrayType(TypeDecorator):
-    """Armazena lista de floats como JSON em TEXT"""
-    impl = Text
-    cache_ok = True
-    def process_bind_param(self, value, dialect):
-        if value is not None:
-            return json.dumps(value)
-        return None
-    def process_result_value(self, value, dialect):
-        if value is not None:
-            return json.loads(value)
-        return None
+# ============================================================================
+# DATA INGESTION — Atividade diária, perfil e metadados
+# ============================================================================
+
+
+@table_registry.mapped_as_dataclass
+class DailyActivity:
+    """Atividade diária de um veículo (apenas dias com target > 0)."""
+    __tablename__ = "daily_activity"
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
+    veiculo_id: Mapped[int] = mapped_column(index=True)
+    data: Mapped[date] = mapped_column()
+    h: Mapped[float] = mapped_column(Float, default=0.0)
+    km: Mapped[float] = mapped_column(Float, default=0.0)
+
+    __table_args__ = (
+        UniqueConstraint("veiculo_id", "data", name="uq_daily_activity_veiculo_data"),
+        Index("idx_daily_veiculo_data", "veiculo_id", "data"),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class VehicleProfileFeature:
+    """Feature do perfil de um veículo (formato long: 1 linha = 1 feature)."""
+    __tablename__ = "vehicle_profile"
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
+    veiculo_id: Mapped[int] = mapped_column(index=True)
+    feature: Mapped[str] = mapped_column(String(120))
+    feature_class: Mapped[str] = mapped_column(String(10), comment="'km', 'h' ou 'type'")
+    valor: Mapped[float] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("veiculo_id", "feature", name="uq_profile_veiculo_feature"),
+        Index("idx_profile_veiculo_class", "veiculo_id", "feature_class"),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class VehicleMetadataH:
+    """Metadados do veículo para a métrica H."""
+    __tablename__ = "vehicle_metadata_h"
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
+    veiculo_id: Mapped[int] = mapped_column(unique=True, index=True)
+    dt_inicio: Mapped[date] = mapped_column()
+    dt_fim: Mapped[date] = mapped_column()
+    upper: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    quality: Mapped[Optional[int]] = mapped_column(default=None, comment="0=VALID,1=OUTLIER,2=NOT_MODELABLE,3=EMPTY")
+    quality_reason: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+
+
+@table_registry.mapped_as_dataclass
+class VehicleMetadataKm:
+    """Metadados do veículo para a métrica KM."""
+    __tablename__ = "vehicle_metadata_km"
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
+    veiculo_id: Mapped[int] = mapped_column(unique=True, index=True)
+    dt_inicio: Mapped[date] = mapped_column()
+    dt_fim: Mapped[date] = mapped_column()
+    upper: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    quality: Mapped[Optional[int]] = mapped_column(default=None, comment="0=VALID,1=OUTLIER,2=NOT_MODELABLE,3=EMPTY")
+    quality_reason: Mapped[Optional[str]] = mapped_column(String(200), default=None)
 
 
 # ============================================================================
-# VEHICLE PROFILE
+# PIPELINE RUNS
 # ============================================================================
 
-class VehicleCategory(str, Enum):
-    """Categoria do veículo"""
-    KM = 'km'
-    H = 'h'
+
+class PipelineStep(str, Enum):
+    """Etapas do pipeline de treinamento."""
+    SEGMENTATION = "segmentation"
+    PROFILES = "profiles"
+    DATASET = "dataset"
+    OPTIMIZATION = "optimization"
+    INGESTION = "ingestion"
+
+
+class PipelineStatus(str, Enum):
+    """Estado de uma execução do pipeline."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ModelType(str, Enum):
+    """Tipo de modelo de forecasting."""
+    MULTIHEAD = "multihead"
+    MOE = "moe"
 
 
 @table_registry.mapped_as_dataclass
-class Vehicle:
-    """
-    Veículo e seu perfil
-    Samples:
-    - samples: lista com últimas N amostras (valores raw, pode conter zeros)
-    - samples_start_date: data da primeira posição do array samples
-    - samples_end_date: data da última posição do array samples
-    Período efetivo (com atividade > 0):
-    - Calculado dinamicamente a partir de samples
-    - first_effective_date = samples_start_date + índice do primeiro valor > 0
-    - last_effective_date = samples_start_date + índice do último valor > 0
-    Exemplo:
-    - samples = [0, 0, 10.5, 12.3, ..., 8.7, 0, 0]  # 364 valores
-    - samples_start_date = 2024-01-01
-    - samples_end_date = 2024-12-30
-    - first_effective_date = 2024-01-03 (calculado: índice 2)
-    - last_effective_date = 2024-12-28 (calculado: índice 362)
-    """
-    __tablename__ = 'vehicles'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    # Categoria e segmento
-    category: Mapped[VehicleCategory] = mapped_column(index=True)
-    segment: Mapped[int] = mapped_column(index=True)
-    # Delimitação temporal dos samples (início e fim do array)
-    samples_start_date: Mapped[date] = mapped_column(
-        comment="Data da primeira posição do array samples"
+class PipelineRun:
+    """Registro de execução de uma etapa do pipeline."""
+    __tablename__ = "pipeline_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
+    step: Mapped[PipelineStep] = mapped_column(index=True)
+    target: Mapped[str] = mapped_column(index=True, comment="'km' ou 'h'")
+    model_type: Mapped[Optional[str]] = mapped_column(
+        default=None,
+        comment="'multihead' ou 'moe' (apenas para optimization)",
     )
-    samples_end_date: Mapped[date] = mapped_column(
-        comment="Data da última posição do array samples"
+    status: Mapped[PipelineStatus] = mapped_column(default=PipelineStatus.PENDING)
+    started_at: Mapped[Optional[datetime]] = mapped_column(default=None)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(default=None)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    metrics: Mapped[Optional[str]] = mapped_column(
+        Text, default=None, comment="JSON com métricas de avaliação",
     )
-    # Normalização
-    upper: Mapped[float] = mapped_column(
-        comment="Percentil superior calculado sobre samples"
-    )
-    # Últimas N amostras (valores raw, pode conter zeros)
-    samples: Mapped[list] = mapped_column(
-        FloatArrayType,
-        comment="Últimas N amostras (valores raw, pode conter zeros)"
+    artifacts: Mapped[Optional[str]] = mapped_column(
+        Text, default=None, comment="JSON com paths dos artefactos gerados",
     )
     created_at: Mapped[datetime] = mapped_column(init=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(init=False, server_default=func.now(), onupdate=func.now())
+
     __table_args__ = (
-        Index('idx_category_segment', 'category', 'segment'),
-        CheckConstraint('samples_start_date <= samples_end_date', name='check_samples_dates'),
+        Index("idx_step_target_status", "step", "target", "status"),
     )
-    def get_effective_period(self) -> tuple[date, date]:
-        """
-        Calcula período efetivo (datas com atividade > 0)
-        Returns
-        -------
-        tuple
-            (first_effective_date, last_effective_date)
-        """
-        if not self.samples:
-            return self.samples_start_date, self.samples_end_date
-        # Encontrar primeiro valor > 0
-        try:
-            first_idx = next(i for i, v in enumerate(self.samples) if v > 0)
-        except StopIteration:
-            # Todos zeros
-            return self.samples_start_date, self.samples_start_date
-        # Encontrar último valor > 0
-        try:
-            last_idx = len(self.samples) - 1 - next(
-                i for i, v in enumerate(reversed(self.samples)) if v > 0
-            )
-        except StopIteration:
-            last_idx = first_idx
-        first_effective = self.samples_start_date + timedelta(days=first_idx)
-        last_effective = self.samples_start_date + timedelta(days=last_idx)
-        return first_effective, last_effective
+
+
+# ============================================================================
+# PREDICTIONS — Resultados de predição
+# ============================================================================
 
 
 @table_registry.mapped_as_dataclass
-class VehicleSummaryFeatures:
-    """
-    Features de resumo do veículo (15 métricas)
-    Nomes genéricos para reutilizar estrutura entre km e h.
-    """
-    __tablename__ = 'vehicle_summary_features'
-    vehicle_id: Mapped[int] = mapped_column(
-        ForeignKey('vehicles.id', ondelete='CASCADE'),
-        primary_key=True
-    )
-  # 15 features
-    per_day: Mapped[float]
-    mean: Mapped[float]
-    max: Mapped[float]
-    median: Mapped[float]
-    std: Mapped[float]
-    continuity_score: Mapped[float]
-    active_weeks_rate: Mapped[float]
-    active_days_rate: Mapped[float]
-    gaps_cv: Mapped[float]
-    mean_gap: Mapped[float]
-    max_gap: Mapped[float]
-    cv: Mapped[float]
-    p25: Mapped[float]
-    p75: Mapped[float]
-    iqr: Mapped[float]
-    created_at: Mapped[datetime] = mapped_column(init=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(init=False, server_default=func.now(), onupdate=func.now())
+class PredictionDaily:
+    """Predição diária de produção por veículo."""
+    __tablename__ = "predictions_daily"
 
+    id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
+    veiculo_id: Mapped[int] = mapped_column(index=True)
+    target: Mapped[str] = mapped_column(String(10), index=True, comment="'km' ou 'h'")
+    data: Mapped[date] = mapped_column()
+    prediction: Mapped[float] = mapped_column(Float)
 
-@table_registry.mapped_as_dataclass
-class VehicleWeekdayFeatures:
-    """
-    Features por dia da semana (70 registros por veículo)
-    7 dias × 10 features = 70 registros por veículo.
-    """
-    __tablename__ = 'vehicle_weekday_features'
-    vehicle_id: Mapped[int] = mapped_column(
-        ForeignKey('vehicles.id', ondelete='CASCADE'),
-        primary_key=True
-    )
-    day: Mapped[int] = mapped_column(
-        primary_key=True,
-        comment="Dia da semana: 1=seg, 2=ter, 3=qua, 4=qui, 5=sex, 6=sab, 7=dom"
-    )
-  # 10 features
-    mean: Mapped[float]
-    std: Mapped[float]
-    median: Mapped[float]
-    max: Mapped[float]
-    min: Mapped[float]
-    p25: Mapped[float]
-    p75: Mapped[float]
-    iqr: Mapped[float]
-    prob_active: Mapped[float]
-    cv: Mapped[float]
-    created_at: Mapped[datetime] = mapped_column(init=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(init=False, server_default=func.now(), onupdate=func.now())
     __table_args__ = (
-        CheckConstraint('day >= 1 AND day <= 7', name='check_valid_weekday'),
-        Index('idx_vehicle_day', 'vehicle_id', 'day'),
+        UniqueConstraint("veiculo_id", "target", "data", name="uq_pred_daily_veiculo_target_data"),
+        Index("idx_pred_daily_target_veiculo", "target", "veiculo_id"),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class PredictionHead:
+    """Predição agregada por head (horizonte) por veículo."""
+    __tablename__ = "predictions_heads"
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
+    veiculo_id: Mapped[int] = mapped_column(index=True)
+    target: Mapped[str] = mapped_column(String(10), index=True, comment="'km' ou 'h'")
+    head: Mapped[int] = mapped_column(comment="Número do head (1-based)")
+    dt_inicio: Mapped[date] = mapped_column()
+    dt_fim: Mapped[date] = mapped_column()
+    prediction: Mapped[float] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("veiculo_id", "target", "head", name="uq_pred_head_veiculo_target_head"),
+        Index("idx_pred_head_target_veiculo", "target", "veiculo_id"),
     )

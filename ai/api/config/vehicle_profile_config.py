@@ -1,69 +1,41 @@
 # api/config/vehicle_profile_config.py
 
-from pydantic import BaseModel, Field
-from typing import Dict
+from typing import List, Optional
+
 import yaml
-import logging
-
-from api.config.path_resolver import resolve_path, resolve_csv_path
-
-logger = logging.getLogger(__name__)
+from pydantic import BaseModel, Field
 
 
-class ProfileConfig(BaseModel):
-    """Configuração de geração de perfis"""
-    sample_size: int = Field(364, ge=1, description="Tamanho da amostra de histórico")
-    p_upper: int = Field(99, ge=1, le=100, description="Percentil para upper bound")
-    n_jobs: int = Field(1, description="Paralelização")
-
-class ClassificationModelsConfig(BaseModel):
-    """Configuração de modelos de classificação"""
-    stage1_type: str
-    stage2_displacement: str
-    stage2_machine: str
+class VehicleProfileFeaturesConfig(BaseModel):
+    """Features por extractor. None = extractor não utilizado."""
+    seg: Optional[List[str]] = ["gap_medio", "cv_gaps", "taxa_dias_ativos", "p75", "iqr"]
+    day: Optional[List[str]] = ["mean", "std", "p25", "p75", "iqr", "prob_active", "cv"]
+    phase: Optional[List[str]] = ["prob_active", "mean", "p75", "iqr", "cv"]
+    cycle: Optional[List[str]] = ["prob_active", "mean", "ratio_fim_inicio"]
 
 
-class ClassificationConfig(BaseModel):
-    """Configuração de classificação"""
-    models: ClassificationModelsConfig
-    min_days: int = Field(28, ge=1)
+class ProfileParamsConfig(BaseModel):
+    """Parâmetros do VehicleProfile."""
+    sample_size: int = Field(364, ge=1)
+    p_upper: int = Field(95, ge=1, le=100)
+    n_jobs: int = Field(4, ge=1)
+    batch_size: int = Field(10, ge=1)
 
 
-class MappingConfig(BaseModel):
-    """Mapeamento de classes"""
-    category: Dict[int, str]
-    segments: Dict[str, int]
+class VehicleProfileMetricFeaturesConfig(BaseModel):
+    """Features por métrica."""
+    km: VehicleProfileFeaturesConfig = VehicleProfileFeaturesConfig()
+    h: VehicleProfileFeaturesConfig = VehicleProfileFeaturesConfig()
 
 
 class VehicleProfileConfig(BaseModel):
-    """Configuração completa de perfis de veículos"""
-    input_data: str = Field(..., description="Path do arquivo de importação de dados")
-    profile: ProfileConfig
-    classification: ClassificationConfig
-    mapping: MappingConfig
-    
+    """Configuração completa do VehicleProfile."""
+    features: VehicleProfileMetricFeaturesConfig = VehicleProfileMetricFeaturesConfig()
+    profile: ProfileParamsConfig = ProfileParamsConfig()
+
     @classmethod
-    def from_yaml(cls, yaml_path: str) -> 'VehicleProfileConfig':
-        """Carrega configuração de arquivo YAML"""
-        logger.info(f"Carregando configuração de perfis: {yaml_path}")
-        
-        with open(yaml_path, 'r', encoding='utf-8') as f:
+    def from_yaml(cls, yaml_path: str) -> "VehicleProfileConfig":
+        with open(yaml_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
-        if "input_data" in data:
-            data["input_data"] = resolve_csv_path(data["input_data"], yaml_path)
-
-        classification = data.get("classification", {})
-        models = classification.get("models", {})
-        for key in ("stage1_type", "stage2_displacement", "stage2_machine"):
-            if key in models:
-                models[key] = resolve_path(models[key], yaml_path)
-        
-        config = cls(**data)
-        logger.info("Configuração de perfis carregada")
-        
-        return config
-    
-    def get_category_from_prediction(self, prediction: int) -> str:
-        """Converte predição para category"""
-        return self.mapping.category.get(prediction, 'unknown')
+        return cls(**data)
