@@ -27,4 +27,5 @@ database.db
 .ipynb_checkpoints/
 
 # Logs
-*.log
+
+projeto.zip

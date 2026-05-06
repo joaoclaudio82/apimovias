@@ -33,6 +33,28 @@ class DailyActivity:
 
 
 @table_registry.mapped_as_dataclass
+class DailyActivityRemoved:
+    """Atividade diária de veículos removidos por critérios de qualidade.
+
+    Mesma estrutura de DailyActivity. Os dados são mantidos aqui para
+    permitir a reintegração do veículo quando dados novos chegarem e a
+    série acumulada passar nos critérios de qualidade.
+    """
+    __tablename__ = "daily_activity_removed"
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
+    veiculo_id: Mapped[int] = mapped_column(index=True)
+    data: Mapped[date] = mapped_column()
+    h: Mapped[float] = mapped_column(Float, default=0.0)
+    km: Mapped[float] = mapped_column(Float, default=0.0)
+
+    __table_args__ = (
+        UniqueConstraint("veiculo_id", "data", name="uq_daily_removed_veiculo_data"),
+        Index("idx_daily_removed_veiculo_data", "veiculo_id", "data"),
+    )
+
+
+@table_registry.mapped_as_dataclass
 class VehicleProfileFeature:
     """Feature do perfil de um veículo (formato long: 1 linha = 1 feature)."""
     __tablename__ = "vehicle_profile"
@@ -77,6 +99,38 @@ class VehicleMetadataKm:
     quality_reason: Mapped[Optional[str]] = mapped_column(String(200), default=None)
 
 
+@table_registry.mapped_as_dataclass
+class ProfileMetadata:
+    """Metadados globais do perfil carregado (atualizado a cada ingestão)."""
+    __tablename__ = "profile_metadata"
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
+    n_veiculos: Mapped[int] = mapped_column(comment="Quantidade de veículos no perfil")
+    dt_inicio: Mapped[date] = mapped_column(comment="Primeira segunda-feira >= min(data)")
+    dt_fim: Mapped[date] = mapped_column(comment="Último domingo <= max(data)")
+    sample_size: Mapped[int] = mapped_column(comment="sample_size utilizado no trimming")
+    created_at: Mapped[datetime] = mapped_column(init=False, server_default=func.now())
+
+
+# ============================================================================
+# ACTIVE MODEL — modelo ONNX vigente por target
+# ============================================================================
+
+
+@table_registry.mapped_as_dataclass
+class ActiveModel:
+    """Modelo ONNX vigente para predição, por target (km/h)."""
+    __tablename__ = "active_models"
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
+    target: Mapped[str] = mapped_column(String(2), unique=True, comment="'km' ou 'h'")
+    filename: Mapped[str] = mapped_column(String(256), comment="Nome do ficheiro ONNX vigente")
+    model_type: Mapped[str] = mapped_column(String(20), comment="'multihead' ou 'moe'")
+    trained_at: Mapped[date] = mapped_column(comment="Data em que o modelo foi gerado")
+    version_id: Mapped[Optional[str]] = mapped_column(String(64), default=None, comment="ID do bundle versionado")
+    activated_at: Mapped[datetime] = mapped_column(init=False, server_default=func.now())
+
+
 # ============================================================================
 # PIPELINE RUNS
 # ============================================================================
@@ -88,7 +142,14 @@ class PipelineStep(str, Enum):
     PROFILES = "profiles"
     DATASET = "dataset"
     OPTIMIZATION = "optimization"
+    TRAINING = "training"
     INGESTION = "ingestion"
+
+
+class FinalStep(str, Enum):
+    """Etapa final do pipeline completo."""
+    OPTIMIZATION = "optimization"
+    TRAINING = "training"
 
 
 class PipelineStatus(str, Enum):
@@ -149,6 +210,7 @@ class PredictionDaily:
     target: Mapped[str] = mapped_column(String(10), index=True, comment="'km' ou 'h'")
     data: Mapped[date] = mapped_column()
     prediction: Mapped[float] = mapped_column(Float)
+    actual: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
 
     __table_args__ = (
         UniqueConstraint("veiculo_id", "target", "data", name="uq_pred_daily_veiculo_target_data"),
@@ -158,18 +220,18 @@ class PredictionDaily:
 
 @table_registry.mapped_as_dataclass
 class PredictionHead:
-    """Predição agregada por head (horizonte) por veículo."""
+    """Predição agregada por bloco temporal (rolling) por veículo."""
     __tablename__ = "predictions_heads"
 
     id: Mapped[int] = mapped_column(primary_key=True, init=False, autoincrement=True)
     veiculo_id: Mapped[int] = mapped_column(index=True)
     target: Mapped[str] = mapped_column(String(10), index=True, comment="'km' ou 'h'")
-    head: Mapped[int] = mapped_column(comment="Número do head (1-based)")
     dt_inicio: Mapped[date] = mapped_column()
     dt_fim: Mapped[date] = mapped_column()
     prediction: Mapped[float] = mapped_column(Float)
+    actual: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
 
     __table_args__ = (
-        UniqueConstraint("veiculo_id", "target", "head", name="uq_pred_head_veiculo_target_head"),
+        UniqueConstraint("veiculo_id", "target", "dt_inicio", name="uq_pred_head_veiculo_target_dt"),
         Index("idx_pred_head_target_veiculo", "target", "veiculo_id"),
     )

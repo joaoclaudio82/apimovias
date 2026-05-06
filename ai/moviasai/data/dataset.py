@@ -627,7 +627,7 @@ class ProfileDatasetGenerator:
         weights = np.array(records_weight)
         df_meta = pd.DataFrame(records_meta)
 
-        df_metadata = df_meta[['veiculo_id', 'ref_date', 'year', 'week', 'upper']].reset_index(drop=True)
+        df_metadata = df_meta[['veiculo_id', 'ref_date', 'year', 'week', 'upper', 'cluster']].reset_index(drop=True)
 
         cols_recent = [f'h_{i}' for i in range(1, self.num_weeks_recent * 7 + 1)]
         df_X_recent = pd.DataFrame(X_recent, columns=cols_recent)

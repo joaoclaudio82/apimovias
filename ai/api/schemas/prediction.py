@@ -21,11 +21,6 @@ class PredictRequest(BaseModel):
     )
 
 
-class PredictAndPersistRequest(BaseModel):
-    """Request para predição e persistência de todos os veículos."""
-    target: str = Field(pattern=r"^(km|h)$", description="Métrica alvo: 'km' ou 'h'")
-
-
 # ── Response items ────────────────────────────────────────────
 
 
@@ -37,7 +32,6 @@ class DailyPredictionItem(BaseModel):
 
 class HeadPredictionItem(BaseModel):
     veiculo_id: int
-    head: int
     dt_inicio: date
     dt_fim: date
     prediction: float
@@ -46,6 +40,12 @@ class HeadPredictionItem(BaseModel):
 class VehicleTypeProbabilities(BaseModel):
     veiculo_id: int
     probabilities: Dict[str, float]
+
+
+class VehicleQuality(BaseModel):
+    veiculo_id: int
+    quality: str
+    quality_reason: Optional[str] = None
 
 
 class VehicleNotFound(BaseModel):
@@ -62,15 +62,8 @@ class PredictResponse(BaseModel):
     predictions_daily: List[DailyPredictionItem]
     predictions_heads: List[HeadPredictionItem]
     type_probabilities: List[VehicleTypeProbabilities]
+    vehicle_quality: List[VehicleQuality] = []
     not_found: List[VehicleNotFound] = []
-
-
-class PredictAndPersistResponse(BaseModel):
-    """Resultado interno do predict_and_persist (logado, não retornado ao cliente)."""
-    target: str
-    total_vehicles: int
-    daily_rows_persisted: int
-    head_rows_persisted: int
 
 
 # ── Backtest ───────────────────────────────────────────────────────
@@ -83,7 +76,6 @@ class BacktestDailyItem(BaseModel):
 
 
 class BacktestHeadItem(BaseModel):
-    head: int
     dt_inicio: date
     dt_fim: date
     actual: float

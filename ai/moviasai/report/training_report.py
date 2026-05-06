@@ -44,26 +44,30 @@ class TrainingReportGenerator:
     # API pública
     # ------------------------------------------------------------------
 
-    def generate(self, pipeline) -> Path:
+    def generate(self, pipeline) -> Path | None:
         pdf_path = self.output_dir / f"training_report_{pipeline.tag}_{pipeline.target}.pdf"
 
-        with PdfPages(str(pdf_path)) as pdf:
-            self._page_cover(pdf, pipeline)
-            self._page_dataset(pdf, pipeline)
-            self._page_training_curves(pdf, pipeline)
+        try:
+            with PdfPages(str(pdf_path)) as pdf:
+                self._page_cover(pdf, pipeline)
+                self._page_dataset(pdf, pipeline)
+                self._page_training_curves(pdf, pipeline)
 
-            for split_name in ("val", "test"):
-                split_data = (pipeline.metrics or {}).get(split_name)
-                if split_data is None:
-                    continue
-                # Ordem conforme spec
-                self._page_metrics_table(pdf, split_name, split_data)
-                self._page_error_histogram(pdf, split_name, split_data)       # Plot 1
-                self._page_error_boxplot(pdf, split_name, split_data)         # Plot 2
-                self._page_scatter_heads_weekly(pdf, split_name, split_data)  # Plot 3
-                self._page_vehicle_curves(pdf, split_name, split_data)        # Plot 4
-                self._page_weekly_cumulative_error(pdf, split_name, split_data)  # Plot 5
-                self._page_error_vs_p95(pdf, split_name, split_data)          # Plot 8
+                for split_name in ("val", "test"):
+                    split_data = (pipeline.metrics or {}).get(split_name)
+                    if split_data is None:
+                        continue
+                    # Ordem conforme spec
+                    self._page_metrics_table(pdf, split_name, split_data)
+                    self._page_error_histogram(pdf, split_name, split_data)       # Plot 1
+                    self._page_error_boxplot(pdf, split_name, split_data)         # Plot 2
+                    self._page_scatter_heads_weekly(pdf, split_name, split_data)  # Plot 3
+                    self._page_vehicle_curves(pdf, split_name, split_data)        # Plot 4
+                    self._page_weekly_cumulative_error(pdf, split_name, split_data)  # Plot 5
+                    self._page_error_vs_p95(pdf, split_name, split_data)          # Plot 8
+        except PermissionError:
+            print(f"⚠ Não foi possível gerar o PDF: sem permissão de escrita em {pdf_path}")
+            return None
 
         print(f"Relatório gerado: {pdf_path}")
         return pdf_path

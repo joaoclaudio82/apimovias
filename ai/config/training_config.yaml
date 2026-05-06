@@ -19,6 +19,11 @@ split:
 # Seed global para reprodutibilidade
 seed: 13
 
+# ---- Hiperparâmetros salvos ----
+# Se true, usa os hiperparâmetros salvos de uma otimização anterior
+# em vez de executar nova busca.
+use_saved_hyperparameters: true
+
 # ---- DataModule (ForecastingDataModule) ----
 data:
   batch_size: 64

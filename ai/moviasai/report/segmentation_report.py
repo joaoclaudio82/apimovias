@@ -45,44 +45,48 @@ class SegmentationReportGenerator:
     # API pública
     # ------------------------------------------------------------------
 
-    def generate(self, pipeline, console_output: str) -> Path:
+    def generate(self, pipeline, console_output: str) -> Path | None:
         pdf_path = self.output_dir / "relatorio_completo.pdf"
 
         print(f"\n{'='*80}")
         print("GERANDO RELATÓRIO PDF")
         print(f"{'='*80}\n")
 
-        with PdfPages(pdf_path) as pdf:
-            self._page_cover(pdf)
-            self._page_console(pdf, console_output)
+        try:
+            with PdfPages(pdf_path) as pdf:
+                self._page_cover(pdf)
+                self._page_console(pdf, console_output)
 
-            if (pipeline.df_features["quality"] == SeriesQuality.OUTLIER).sum() > 0:
-                self._page_anomalies(pdf, pipeline)
+                if (pipeline.df_features["quality"] == SeriesQuality.OUTLIER).sum() > 0:
+                    self._page_anomalies(pdf, pipeline)
 
-            if pipeline.metric_clusterer:
-                self._page_clustering(
-                    pdf, pipeline.metric_clusterer, "Etapa 1: Identificação de Métrica"
-                )
+                if pipeline.metric_clusterer:
+                    self._page_clustering(
+                        pdf, pipeline.metric_clusterer, "Etapa 1: Identificação de Métrica"
+                    )
 
-            if pipeline.metric_classifier and pipeline.metric_classifier.results:
-                self._page_classification(pdf, pipeline.metric_classifier)
-                self._page_decision_boundaries(pdf, pipeline)
+                if pipeline.metric_classifier and pipeline.metric_classifier.results:
+                    self._page_classification(pdf, pipeline.metric_classifier)
+                    self._page_decision_boundaries(pdf, pipeline)
 
-            if pipeline.km_clusterer:
-                self._page_clustering(
-                    pdf, pipeline.km_clusterer, "Etapa 2: Segmentação - KM"
-                )
-            if pipeline.km_classifier and pipeline.km_classifier.results:
-                self._page_classification(pdf, pipeline.km_classifier)
+                if pipeline.km_clusterer:
+                    self._page_clustering(
+                        pdf, pipeline.km_clusterer, "Etapa 2: Segmentação - KM"
+                    )
+                if pipeline.km_classifier and pipeline.km_classifier.results:
+                    self._page_classification(pdf, pipeline.km_classifier)
 
-            if pipeline.h_clusterer:
-                self._page_clustering(
-                    pdf, pipeline.h_clusterer, "Etapa 2: Segmentação - H"
-                )
-            if pipeline.h_classifier and pipeline.h_classifier.results:
-                self._page_classification(pdf, pipeline.h_classifier)
+                if pipeline.h_clusterer:
+                    self._page_clustering(
+                        pdf, pipeline.h_clusterer, "Etapa 2: Segmentação - H"
+                    )
+                if pipeline.h_classifier and pipeline.h_classifier.results:
+                    self._page_classification(pdf, pipeline.h_classifier)
 
-            self._page_segment_stats(pdf, pipeline)
+                self._page_segment_stats(pdf, pipeline)
+        except PermissionError:
+            print(f"\n⚠ Não foi possível gerar o PDF: sem permissão de escrita em {pdf_path}")
+            return None
 
         print(f"✓ PDF gerado: {pdf_path}")
         print(f"  Tamanho: {pdf_path.stat().st_size / (1024*1024):.2f} MB")

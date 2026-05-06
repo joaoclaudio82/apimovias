@@ -5,33 +5,22 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 from http import HTTPStatus
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from api.schemas import Message
 from api.schemas.prediction import (
-    PredictAndPersistRequest,
     PredictRequest,
     PredictResponse,
     BacktestResponse,
 )
-from api.services import prediction_service, task_manager
+from api.services import prediction_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/prediction", tags=["prediction"])
-
-_TASK_STEP = "prediction"  # chave fixa no task_manager
-
-
-def _check_not_running(target: str):
-    """Levanta 409 se já houver predição em execução para o target."""
-    if task_manager.is_running(_TASK_STEP, target):
-        raise HTTPException(
-            status_code=HTTPStatus.CONFLICT,
-            detail=f"Predição para '{target}' já está em execução.",
-        )
 
 
 @router.post(
@@ -54,31 +43,6 @@ async def predict(request: PredictRequest):
     return PredictResponse(**result)
 
 
-@router.post(
-    "/predict_and_persist",
-    response_model=Message,
-    status_code=HTTPStatus.ACCEPTED,
-    summary="Predição para todos os veículos com persistência (background)",
-)
-async def predict_and_persist(request: PredictAndPersistRequest):
-    """
-    Submete predição para todos os veículos em background.
-
-    Apenas uma execução por target é permitida em simultâneo.
-    """
-    _check_not_running(request.target)
-
-    task_manager.submit(
-        _TASK_STEP,
-        request.target,
-        prediction_service.predict_and_persist(target=request.target),
-    )
-
-    return Message(
-        message=f"Predição para '{request.target}' submetida em background.",
-    )
-
-
 @router.get(
     "/backtest/{veiculo_id}",
     response_model=BacktestResponse,
@@ -88,9 +52,15 @@ async def predict_and_persist(request: PredictAndPersistRequest):
 async def backtest(
     veiculo_id: int,
     target: str = Query(pattern=r"^(km|h)$", description="Métrica: 'km' ou 'h'"),
+    date_from: Optional[date] = Query(None, description="Data inicial do gráfico diário"),
+    date_to: Optional[date] = Query(None, description="Data final do gráfico diário"),
+    max_heads: Optional[int] = Query(None, ge=1, description="Quantidade máxima de blocos (mais recentes)"),
 ):
     """Compara predições persistidas com valores reais de daily_activity."""
-    result = await prediction_service.backtest(veiculo_id, target)
+    result = await prediction_service.backtest(
+        veiculo_id, target,
+        date_from=date_from, date_to=date_to, max_heads=max_heads,
+    )
     if result is None:
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,

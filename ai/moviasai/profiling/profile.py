@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -415,23 +416,118 @@ class VehicleProfile:
         self.add_segment(segment_classifier_km, target='km', cluster_features=cluster_features)
         self.add_segment(segment_classifier_h, target='h', cluster_features=cluster_features)
 
-        # Construir lista explícita de features a incluir no long format
+        # Propagar type + cluster para veículos inválidos em df_features
+        self._propagate_classification_to_invalid(
+            type_classifier, segment_classifier_km, segment_classifier_h,
+            cluster_features,
+        )
+
+        return self._to_long_format(self.df_no_anomalies)
+
+    def _propagate_classification_to_invalid(
+        self,
+        type_classifier: "TypeClassifier",
+        segment_classifier_km: "SegmentationClassifier",
+        segment_classifier_h: "SegmentationClassifier",
+        cluster_features: Optional[str],
+    ) -> None:
+        """Aplica type + segment aos veículos inválidos em df_features.
+
+        Assim ``get_invalid_vehicles_long()`` devolve features completas
+        (incluindo cluster_*) para veículos que possuem dados suficientes.
+        Veículos que não podem ser classificados ficam com NaN nessas colunas
+        e serão filtrados por ``get_invalid_vehicles_long()``.
+        """
+        if self.df_features is None or 'quality' not in self.df_features.columns:
+            return
+
+        # Garantir que colunas type_*/cluster_* existem em df_features (NaN por defeito).
+        # Válidos já têm valores via df_no_anomalies; inválidos começam com NaN.
+        new_cols = [c for c in self.df_no_anomalies.columns
+                    if c.startswith(("type_", "cluster_")) and c not in self.df_features.columns]
+        for col in new_cols:
+            self.df_features[col] = np.nan
+
+        # Copiar valores dos veículos válidos (que já foram classificados)
+        valid_idx = self.df_features[self.df_features['quality'] == 0].index
+        for col in [c for c in self.df_features.columns if c.startswith(("type_", "cluster_"))]:
+            if col in self.df_no_anomalies.columns:
+                # Alinhar por veiculo_id
+                mapping = self.df_no_anomalies.set_index('veiculo_id')[col]
+                self.df_features.loc[valid_idx, col] = (
+                    self.df_features.loc[valid_idx, 'veiculo_id'].map(mapping).values
+                )
+
+        # Agora tentar classificar veículos inválidos
+        df_inv = self.df_features[self.df_features['quality'] != 0].copy()
+        if df_inv.empty:
+            return
+
+        # --- Type ---
+        type_feats = type_classifier.feature_names
+        if all(f in df_inv.columns for f in type_feats):
+            X_type = df_inv[type_feats].values
+            mask_ok = ~(np.isnan(X_type).any(axis=1) | np.isinf(X_type).any(axis=1))
+            if mask_ok.any():
+                _, probs = type_classifier.predict(X_type[mask_ok])
+                if probs is not None:
+                    for i in range(probs.shape[1]):
+                        col = f"type_{i + 1}"
+                        self.df_features.loc[df_inv.index[mask_ok], col] = probs[:, i]
+
+        # --- Segment KM ---
+        self._classify_invalid_segment(df_inv, segment_classifier_km, 'km', cluster_features)
+        # --- Segment H ---
+        self._classify_invalid_segment(df_inv, segment_classifier_h, 'h', cluster_features)
+
+    def _classify_invalid_segment(
+        self,
+        df_inv: pd.DataFrame,
+        segment_classifier: "SegmentationClassifier",
+        target: str,
+        cluster_features: Optional[str],
+    ) -> None:
+        """Classifica segmento para veículos inválidos e propaga a df_features."""
+        if cluster_features is None:
+            return
+
+        feature_names = segment_classifier.feature_names
+        if not all(f in df_inv.columns for f in feature_names):
+            return
+
+        X = df_inv[feature_names].values
+        mask_ok = ~(np.isnan(X).any(axis=1) | np.isinf(X).any(axis=1))
+        if not mask_ok.any():
+            return
+
+        predictions, probabilities = segment_classifier.predict(X[mask_ok])
+        df_cluster = expand_cluster_columns(
+            predictions=predictions,
+            probabilities=probabilities,
+            cluster_features=cluster_features,
+            target=target,
+        )
+
+        for col in df_cluster.columns:
+            if col not in self.df_features.columns:
+                self.df_features[col] = np.nan
+            self.df_features.loc[df_inv.index[mask_ok], col] = df_cluster[col].values
+
+    def _to_long_format(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Converte DataFrame wide em formato long (veiculo_id, feature, feature_class, valor)."""
         type_names = set(self.type_extractor.feature_names)
         km_names = {f for ext in self.km_extractors.values() for f in ext.feature_names}
         h_names = {f for ext in self.h_extractors.values() for f in ext.feature_names}
 
-        # Features adicionadas por add_type (type_1, type_2, ...)
-        type_prob_cols = {c for c in self.df_no_anomalies.columns if c.startswith("type_")}
-
-        # Features adicionadas por add_segment (cluster_*_km, cluster_*_h)
-        cluster_cols = {c for c in self.df_no_anomalies.columns if c.startswith("cluster_")}
+        type_prob_cols = {c for c in df.columns if c.startswith("type_")}
+        cluster_cols = {c for c in df.columns if c.startswith("cluster_")}
 
         feature_cols = sorted(
             (type_names | km_names | h_names | type_prob_cols | cluster_cols)
-            & set(self.df_no_anomalies.columns)
+            & set(df.columns)
         )
 
-        df_long = self.df_no_anomalies.melt(
+        df_long = df.melt(
             id_vars=['veiculo_id'],
             value_vars=feature_cols,
             var_name='feature',
@@ -439,7 +535,7 @@ class VehicleProfile:
         )
 
         def _classify(feat: str) -> str:
-            if feat in type_names:
+            if feat in type_names or re.match(r'^type_\d+$', feat):
                 return 'type'
             if feat in km_names:
                 return 'km'
@@ -449,6 +545,40 @@ class VehicleProfile:
 
         df_long['feature_class'] = df_long['feature'].map(_classify)
         return df_long[['veiculo_id', 'feature', 'feature_class', 'valor']]
+
+    def get_invalid_vehicles_long(self) -> pd.DataFrame:
+        """Retorna veículos não-válidos em formato long.
+
+        Filtra ``df_features`` por ``quality != 0`` e exclui veículos
+        com NaN ou Infinity em qualquer coluna numérica.
+
+        Returns
+        -------
+        pd.DataFrame
+            Colunas: ``veiculo_id``, ``feature``, ``feature_class``, ``valor``.
+        """
+        empty = pd.DataFrame(columns=['veiculo_id', 'feature', 'feature_class', 'valor'])
+
+        if self.df_features is None or 'quality' not in self.df_features.columns:
+            return empty
+
+        df_invalid = self.df_features[self.df_features['quality'] != 0].copy()
+
+        if df_invalid.empty:
+            return empty
+
+        # Excluir veículos com NaN ou Infinity em colunas numéricas
+        numeric_cols = df_invalid.select_dtypes(include='number').columns.drop('veiculo_id', errors='ignore')
+        has_bad = (
+            df_invalid[numeric_cols].isna().any(axis=1)
+            | np.isinf(df_invalid[numeric_cols]).any(axis=1)
+        )
+        df_invalid = df_invalid[~has_bad]
+
+        if df_invalid.empty:
+            return empty
+
+        return self._to_long_format(df_invalid)
 
     def __repr__(self) -> str:
         n = len(self.df_features) if self.df_features is not None else 0

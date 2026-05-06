@@ -62,6 +62,7 @@ class TrainingConfig(BaseModel):
     normalization: NormalizationConfig = NormalizationConfig()
     split: SplitConfig = SplitConfig()
     seed: int = 42
+    use_saved_hyperparameters: bool = True
     data: DataConfig = DataConfig()
     trainer: TrainerConfig = TrainerConfig()
     onnx: OnnxConfig = OnnxConfig()

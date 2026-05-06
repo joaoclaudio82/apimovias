@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as lightning
 import torch
+import yaml
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 
@@ -35,60 +36,10 @@ from moviasai.forecasting.models import (
     VehicleForecastingMultiHeadModel,
     VehicleForecastingSafeMoEModel,
 )
+from moviasai.forecasting.metrics import compute_maintenance_metrics, save_predictions
 from moviasai.profiling.profile import VersionedVehicleProfile
 
 logger = logging.getLogger(__name__)
-
-
-# ----------------------------------------------------------------------
-# Helpers para métricas de decisão de manutenção (horizonte misto)
-# ----------------------------------------------------------------------
-
-
-def _find_crossing_week_hybrid(
-    daily_values: np.ndarray,
-    head_values: np.ndarray,
-    head_days: list,
-    limit: float,
-) -> float | None:
-    """
-    Estima em que *dia* (float, 1-indexed) o acumulado cruza ``limit``.
-
-    Resolução:
-    - Semana 1 (head 0): usa ``daily_values`` dia a dia.
-    - Semanas seguintes: usa ``head_values`` como bloco semanal,
-      assumindo distribuição uniforme **apenas para interpolar
-      dentro da semana** em que ocorre o cruzamento.
-
-    Retorna ``None`` se o limite não for atingido no horizonte.
-    """
-    D = len(daily_values)                      # daily_horizon (ex.: 7)
-    first_head_days = head_days[0]             # ex.: 7
-
-    # --- Fase 1: varrer daily_values (semana 1) ---
-    cumsum = 0.0
-    for d in range(min(D, first_head_days)):
-        cumsum += daily_values[d]
-        if cumsum >= limit:
-            return float(d + 1)                # dia 1-indexed
-
-    # --- Fase 2: varrer heads restantes como blocos ---
-    offset_day = first_head_days
-    cumsum_at_start = float(head_values[0])    # head 0 = semana 1 completa
-    for h in range(1, len(head_days)):
-        cumsum_at_end = cumsum_at_start + head_values[h]
-        if cumsum_at_end >= limit:
-            # Interpolar linearmente dentro deste bloco
-            remaining = limit - cumsum_at_start
-            if head_values[h] > 0:
-                frac = remaining / head_values[h]
-            else:
-                frac = 1.0
-            return offset_day + frac * head_days[h]
-        cumsum_at_start = cumsum_at_end
-        offset_day += head_days[h]
-
-    return None
 
 
 class TrainingPipeline:
@@ -158,6 +109,39 @@ class TrainingPipeline:
             "weight_decay": fc.optimizer.weight_decay,
             "alpha_daily": fc.model.alpha_daily,
         }
+
+        # Sobrescrever hiperparâmetros com valores salvos de otimização
+        if getattr(training_cfg, "use_saved_hyperparameters", False):
+            tag = cls.tag
+            hparams_file = Path(output_config.training_dir(target)) / f"best_hparams_{tag}_{target}.yaml"
+            if hparams_file.exists():
+                logger.info(
+                    "Usando hiperparâmetros salvos: %s", hparams_file,
+                )
+                with open(hparams_file, "r", encoding="utf-8") as f:
+                    saved = yaml.safe_load(f) or {}
+
+                best_params = saved.get("best_params", {})
+
+                # Sobrescrever atributos de model e optimizer
+                for key, value in best_params.items():
+                    if key in model_hparams:
+                        logger.info(
+                            "  %s: %s → %s (salvo)",
+                            key, model_hparams[key], value,
+                        )
+                        model_hparams[key] = value
+                    else:
+                        logger.warning(
+                            "  %s: ignorado (não reconhecido em model_hparams)",
+                            key,
+                        )
+            else:
+                logger.info(
+                    "use_saved_hyperparameters=True mas arquivo não encontrado: %s. "
+                    "Usando hiperparâmetros do model_config.yaml.",
+                    hparams_file,
+                )
 
         tc = training_cfg
         training_hparams = {
@@ -436,7 +420,7 @@ class TrainingPipeline:
         )
 
         # Métricas de decisão de manutenção (horizonte misto)
-        maintenance = self._compute_maintenance_metrics(
+        maintenance = compute_maintenance_metrics(
             y_daily_true, y_daily_pred_denorm,
             y_heads_true, y_heads_pred_denorm,
             head_days, upper,
@@ -453,6 +437,18 @@ class TrainingPipeline:
         self._log_metrics(name, maintenance, heads_mae, heads_rmse,
                           daily_mae, daily_rmse, head_days)
 
+        # Salvar predições
+        pred_dir = Path(self.training_dir) / "predictions"
+        save_predictions(
+            pred_dir, name, dataset.metadata,
+            y_heads_true, y_heads_pred_denorm,
+            y_daily_true, y_daily_pred_denorm,
+        )
+        logger.info(
+            "Predições salvas: %s (%d amostras)",
+            pred_dir, len(dataset.metadata),
+        )
+
         return {
             "maintenance": maintenance,
             "y_heads_true": y_heads_true,
@@ -467,68 +463,6 @@ class TrainingPipeline:
             "daily_mae": daily_mae,
             "daily_rmse": daily_rmse,
         }
-
-    @staticmethod
-    def _compute_maintenance_metrics(
-        y_daily_true: np.ndarray,
-        y_daily_pred: np.ndarray,
-        y_heads_true: np.ndarray,
-        y_heads_pred: np.ndarray,
-        head_days: list,
-        upper: np.ndarray,
-    ) -> Dict:
-        """Calcula métricas de decisão de manutenção para k=2,3,4 semanas.
-
-        Usa resolução **mista**: ``y_daily`` para a 1ª semana (granularidade
-        diária) e ``y_heads`` para as semanas seguintes (agregado semanal).
-        Nunca fabrica resolução diária além de ``daily_horizon``.
-
-        Parameters
-        ----------
-        y_daily_true, y_daily_pred : (N, D) consumo diário denormalizado
-        y_heads_true, y_heads_pred : (N, H) consumo agregado denormalizado
-        head_days : dias por head (ex.: [7, 7, 7, 7])
-        upper : (N,) P95 diário por veículo (escala original)
-
-        Returns
-        -------
-        Dict com chaves ``'k2'``, ``'k3'``, ``'k4'``.
-        """
-        total_days = sum(head_days)
-        N = len(upper)
-        results: Dict = {}
-
-        for k in (2, 3, 4):
-            limits = k * upper * 7  # limite por amostra
-            errors = np.full(N, np.nan)
-
-            for i in range(N):
-                real_day = _find_crossing_week_hybrid(
-                    y_daily_true[i], y_heads_true[i], head_days, limits[i],
-                )
-                pred_day = _find_crossing_week_hybrid(
-                    y_daily_pred[i], y_heads_pred[i], head_days, limits[i],
-                )
-
-                if real_day is not None and pred_day is not None:
-                    errors[i] = pred_day - real_day
-                elif real_day is None and pred_day is None:
-                    errors[i] = 0
-                elif pred_day is not None:
-                    errors[i] = pred_day - (total_days + 1)
-                else:
-                    errors[i] = (total_days + 1) - real_day
-
-            results[f"k{k}"] = {
-                "mean_error": float(np.nanmean(errors)),
-                "mae_days": float(np.nanmean(np.abs(errors))),
-                "p90_error": float(np.nanpercentile(errors, 90)),
-                "pct_late": float(np.nanmean(errors > 0) * 100),
-                "pct_early": float(np.nanmean(errors < 0) * 100),
-                "errors": errors,
-            }
-
-        return results
 
     @staticmethod
     def _log_metrics(
@@ -558,10 +492,10 @@ class TrainingPipeline:
 
         # Decisão de manutenção
         print("\n  DECISÃO DE MANUTENÇÃO:")
-        for k_label in ("k2", "k3", "k4"):
+        for k_label in sorted(maintenance.keys()):
             m = maintenance[k_label]
-            k = int(k_label[1])
-            print(f"\n  Limite: {k} semanas (k={k})")
+            k = int(k_label[1:])
+            print(f"\n  Limite: k={k} ({k_label})")
             print(f"    Erro médio:          {m['mean_error']:+.2f} dias")
             print(f"    Erro absoluto médio: {m['mae_days']:.2f} dias")
             print(f"    P90 erro:            {m['p90_error']:+.2f} dias")
@@ -575,7 +509,18 @@ class TrainingPipeline:
     # ------------------------------------------------------------------
 
     def export_onnx(self) -> Optional[Path]:
-        """Exporta o modelo treinado para ONNX, se habilitado."""
+        """
+        Exporta o modelo treinado para ONNX, se habilitado.
+
+        Salva com sufixo de data (ex.: forecasting_moe_km_20260427.onnx).
+        O path exportado fica disponível em ``self.exported_onnx_path``.
+
+        Returns
+        -------
+        Path para o ficheiro exportado, ou None se desabilitado.
+        """
+        from datetime import date as _date
+
         onnx_cfg = self.training_hparams["onnx"]
         if not onnx_cfg["enabled"]:
             logger.info("Exportação ONNX desabilitada.")
@@ -584,16 +529,22 @@ class TrainingPipeline:
         if self.model is None or self.data_module is None:
             raise RuntimeError("Modelo não treinado.")
 
-        target_path = self.model_dir / self._onnx_filename
-        target_path.parent.mkdir(parents=True, exist_ok=True)
+        # Ficheiro com data (versionado)
+        stem = Path(self._onnx_filename).stem  # ex: forecasting_moe_km
+        today = _date.today().strftime("%Y%m%d")
+        dated_filename = f"{stem}_{today}.onnx"
+        dated_path = self.model_dir / dated_filename
+        dated_path.parent.mkdir(parents=True, exist_ok=True)
 
         onnx_path = self.model.export_onnx(
-            path=target_path,
+            path=dated_path,
             n_recent_steps=self.data_module.n_recent_steps,
             opset_version=onnx_cfg["opset_version"],
             verify=onnx_cfg["verify"],
         )
         logger.info("Modelo ONNX exportado: %s", onnx_path)
+
+        self.exported_onnx_path = onnx_path
         return onnx_path
 
     # ------------------------------------------------------------------

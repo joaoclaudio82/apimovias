@@ -12,9 +12,10 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from sqlalchemy import select
 
 from api.database import session_context
-from api.models import VehicleMetadataH, VehicleMetadataKm, VehicleProfileFeature
+from api.models import ProfileMetadata, VehicleMetadataH, VehicleMetadataKm, VehicleProfileFeature
 from api.schemas import Message
-from api.schemas.profiling import VehicleInfoResponse
+from api.schemas.profiling import ProfileMetadataResponse, VehicleInfoResponse, VehicleSummary
+from api.schemas.training_pipeline import _to_local_str
 from api.services import task_manager
 from api.services.profiling_service import create_ingestion_run, ingest_and_predict
 
@@ -46,6 +47,98 @@ def _check_not_running():
             status_code=HTTPStatus.CONFLICT,
             detail="Já há uma ingestão+predição em execução.",
         )
+
+
+# ------------------------------------------------------------------
+# GET — listar veículos
+# ------------------------------------------------------------------
+
+
+@router.get(
+    "/vehicles",
+    response_model=list[VehicleSummary],
+    status_code=HTTPStatus.OK,
+    summary="Listar todos os veículos com metadados de ambos os targets",
+)
+async def list_vehicles(
+    quality: int | None = Query(None, description="Filtrar por qualidade (0=válida,1=outlier,2=não modelável,3=vazia)"),
+):
+    """Retorna resumo de todos os veículos com metadados H e KM."""
+    async with session_context() as session:
+        result_km = await session.execute(select(VehicleMetadataKm))
+        rows_km = {r.veiculo_id: r for r in result_km.scalars().all()}
+
+        result_h = await session.execute(select(VehicleMetadataH))
+        rows_h = {r.veiculo_id: r for r in result_h.scalars().all()}
+
+    all_vids = sorted(set(rows_km) | set(rows_h))
+
+    vehicles = []
+    for vid in all_vids:
+        km = rows_km.get(vid)
+        h = rows_h.get(vid)
+
+        # Qualidade é por veículo — pegar de qualquer target disponível
+        q = km.quality if km else (h.quality if h else None)
+        qr = km.quality_reason if km else (h.quality_reason if h else None)
+
+        if quality is not None and q != quality:
+            continue
+
+        vehicles.append(VehicleSummary(
+            veiculo_id=vid,
+            quality=q,
+            quality_reason=qr,
+            dt_inicio_km=km.dt_inicio if km else None,
+            dt_fim_km=km.dt_fim if km else None,
+            upper_km=km.upper if km else None,
+            dt_inicio_h=h.dt_inicio if h else None,
+            dt_fim_h=h.dt_fim if h else None,
+            upper_h=h.upper if h else None,
+        ))
+
+    return vehicles
+
+
+# ------------------------------------------------------------------
+# GET — profile metadata
+# ------------------------------------------------------------------
+
+
+@router.get(
+    "/metadata",
+    response_model=list[ProfileMetadataResponse],
+    status_code=HTTPStatus.OK,
+    summary="Histórico de metadados do perfil",
+)
+async def list_profile_metadata(
+    last: bool = Query(False, description="Se True, retorna apenas o mais recente"),
+):
+    """Retorna o histórico de profile_metadata (ou só o último com ?last=true)."""
+    async with session_context() as session:
+        stmt = select(ProfileMetadata).order_by(ProfileMetadata.id.desc())
+        if last:
+            stmt = stmt.limit(1)
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+
+    if not rows:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail="Nenhum profile_metadata encontrado. Execute a ingestão primeiro.",
+        )
+
+    return [
+        ProfileMetadataResponse(
+            id=r.id,
+            n_veiculos=r.n_veiculos,
+            dt_inicio=r.dt_inicio,
+            dt_fim=r.dt_fim,
+            sample_size=r.sample_size,
+            created_at=_to_local_str(r.created_at),
+        )
+        for r in rows
+    ]
 
 
 # ------------------------------------------------------------------

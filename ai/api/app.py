@@ -22,103 +22,65 @@ logger = logging.getLogger("uvicorn")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifecycle do app"""
-    logger.info("="*60)
-    logger.info("INICIANDO APLICAÇÃO")
-    logger.info("="*60)
-    
-    # Criar tabelas
+    logger.info("  🔄 Iniciando aplicação...")
+        # Criar tabelas
     async with engine.begin() as conn:
         await conn.run_sync(table_registry.metadata.create_all)
-    logger.info("✅ Tabelas criadas/verificadas")
-   
-    # Carregar configurações
-    logger.info("\n" + "="*60)
-    logger.info("CARREGANDO CONFIGURAÇÕES")
-    logger.info("="*60)
-    config_base_path = Path(__file__).parent.parent / "config"
+    logger.info("  ✅ Banco de dados inicializado")
 
-    # # 1. Predictor Config
-    # try:
-    #     predictor_config_path = config_base_path / "predictor_config.yaml"
-    #     if predictor_config_path.exists():
-    #         app.state.predictor_config = PredictorConfig.from_yaml(str(predictor_config_path))
-    #         # Validar modelos
-    #         validation = app.state.predictor_config.validate_all_models_exist()
-    #         logger.info(f"✅ Predictor config: {len(validation['found'])} modelos encontrados")
-    #         if validation['missing']:
-    #             logger.warning(f"⚠️  {len(validation['missing'])} modelos faltando")
-    #     else:
-    #         app.state.predictor_config = None
-    #         logger.warning(f"⚠️  Predictor config não encontrada: {predictor_config_path}")
-    # except Exception as e:
-    #     logger.error(f"❌ Erro ao carregar predictor config: {e}")
-    #     app.state.predictor_config = None
-    
-    # # 2. Vehicle Profile Config
-    # try:
-    #     profile_config_path = config_base_path / "vehicle_profile_config.yaml"
-    #     if profile_config_path.exists():
-    #         app.state.vehicle_profile_config = VehicleProfileConfig.from_yaml(str(profile_config_path))
-    #         logger.info("✅ Vehicle profile config carregada")
-    #     else:
-    #         app.state.vehicle_profile_config = None
-    #         logger.warning(f"⚠️  Vehicle profile config não encontrada: {profile_config_path}")
-    # except Exception as e:
-    #     logger.error(f"❌ Erro ao carregar vehicle profile config: {e}")
-    #     app.state.vehicle_profile_config = None
-    
-    # # 3. Data Ingestion Config
-    # try:
-    #     ingestion_config_path = config_base_path / "data_ingestion_config.yaml"
-    #     if ingestion_config_path.exists():
-    #         app.state.data_ingestion_config = DataIngestionConfig.from_yaml(str(ingestion_config_path))
-    #         logger.info("✅ Data ingestion config carregada")
-    #     else:
-    #         app.state.data_ingestion_config = None
-    #         logger.warning(f"⚠️  Data ingestion config não encontrada: {ingestion_config_path}")
-    # except Exception as e:
-    #     logger.error(f"❌ Erro ao carregar data ingestion config: {e}")
-    #     app.state.data_ingestion_config = None
-    
-    # # 4. Training Config
-    # try:
-    #     training_config_path = config_base_path / "training_config.yaml"
-    #     if training_config_path.exists():
-    #         app.state.training_config = TrainingConfig.from_yaml(str(training_config_path))
-    #         logger.info("✅ Training config carregada")
-    #     else:
-    #         app.state.training_config = None
-    #         logger.warning(f"⚠️  Training config não encontrada: {training_config_path}")
-    # except Exception as e:
-    #     logger.error(f"❌ Erro ao carregar training config: {e}")
-    #     app.state.training_config = None
-    
-    logger.info("="*60)
-    logger.info("✅ APLICAÇÃO INICIADA COM SUCESSO")
-    logger.info("="*60)
+    """Lifecycle do app"""
+    logger.info("")
+    logger.info("╔══════════════════════════════════════════════════════════╗")
+    logger.info("║              🚛  MOVIAS AI API  v1.0.0                   ║")
+    logger.info("║                                                          ║")
+    logger.info("║  Análise de perfis de veículos e predição de produção    ║")
+    logger.info("╚══════════════════════════════════════════════════════════╝")
+    logger.info("")
+
+
+    logger.info("  ✅ Routers registrados: /profiling, /prediction, /pipeline")
+    logger.info("  ✅ Documentação disponível em /docs e /redoc")
+    logger.info("")
+    logger.info("  🟢 API pronta para receber requisições")
+    logger.info("")
     yield
     
-    logger.info("Finalizando aplicação...")
+    logger.info("")
+    logger.info("  🔴 Finalizando aplicação...")
     await engine.dispose()
-    logger.info("✅ Conexões fechadas")
+    logger.info("  ✅ Conexões fechadas")
 
 
 app = FastAPI(
     title="Movias AI API",
     description="""
-    API para gerenciamento de perfis de veículos e predições de manutenção.
-    ## Funcionalidades
-    * **Perfis de Veículos** - Importação, atualização e consulta de perfis
-    * **Predições** - Predição de datas e valores acumulados
-    * **Ingestão de Dados** - Pipeline de processamento de dados
-    * **Treinamento** - Treinamento de modelos de ML
+API para análise de perfis de veículos e predição de produção.
+
+## Módulos
+
+### 🚗 Profiling
+- **Ingestão de dados** — Upload de CSV com atividade diária, execução automática de profiling e predição
+- **Veículos** — Listagem de veículos com metadados e qualidade
+- **Detalhes** — Perfil de features, metadados e classificação por veículo/target
+- **Metadata** — Histórico de perfis carregados
+
+### 📈 Predição
+- **Predição** — Execução de modelos ONNX (multihead/MoE) para previsão de H e KM
+- **Backtest** — Comparação de predições com valores reais (diário e blocos semanais)
+
+### ⚙️ Pipeline de Treino
+- **Segmentação** — Clusterização de veículos
+- **Perfis** — Geração de perfis de veículos
+- **Datasets** — Preparação de dados de treino
+- **Otimização** — Busca de hiperparâmetros e treino de modelos
+- **Pipeline completo** — Execução sequencial de todas as etapas
+- **Modelos** — Gestão de modelos ONNX ativos
     """,
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 
@@ -127,10 +89,10 @@ app = FastAPI(
     status_code=HTTPStatus.OK,
     response_model=Message,
     tags=['health'],
-    summary='Health check'
+    summary='Verificar status da API',
 )
 async def read_root():
-    """Endpoint de health check"""
+    """Retorna status de saúde da API."""
     return {'message': 'Movias AI API - Online'}
 
 

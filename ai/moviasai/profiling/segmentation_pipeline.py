@@ -30,11 +30,9 @@ import polars as pl
 
 from moviasai.profiling.classification import SegmentationClassifier, TypeClassifier
 from moviasai.profiling.clustering import SegmentationClusterer, TypeClusterer
-from moviasai.data.data_quality import DataQualityEvaluator, SeriesQuality
-from moviasai.profiling.feature_extraction import (
-    SegmentationFeatureExtractor,
-    TypeFeatureExtractor,
-)
+from moviasai.data.data_quality import SeriesQuality
+from moviasai.versioning import PipelineManifest
+
 from moviasai.profiling.profile import VehicleProfile
 
 
@@ -64,7 +62,6 @@ class VehicleSegmentationPipeline:
         generate_pdf: bool = True,
         # Diretórios
         output_base_dir: str = "./output",
-        classification_dir: Optional[str] = None,
         dataset_dir: Optional[str] = None,
     ):
         # Validar colunas obrigatórias
@@ -77,7 +74,7 @@ class VehicleSegmentationPipeline:
         self.df_daily = df_daily
         self.filter_thresholds = filter_thresholds
         self.output_base_dir = Path(output_base_dir)
-        self.classification_dir = Path(classification_dir) if classification_dir else self.output_base_dir / "classification"
+        self.classification_dir = self.output_base_dir / "models"
         self.dataset_dir = Path(dataset_dir) if dataset_dir else self.output_base_dir / "train_data"
         self.console_output = ""
 
@@ -185,7 +182,6 @@ class VehicleSegmentationPipeline:
             high_pct=s1.uncertainty.high_pct,
             generate_pdf=config.report.enabled,
             output_base_dir=output_config.logs.segmentation,
-            classification_dir=output_config.models.classification,
             dataset_dir=output_config.data.train_dataset,
         )
 
@@ -689,6 +685,9 @@ class VehicleSegmentationPipeline:
             # 8. Exportação
             self._export_final_datasets()
 
+            # 9. Manifest de versionamento
+            self._write_manifest()
+
             print("\n" + "=" * 80)
             print("PIPELINE CONCLUÍDO")
             print("=" * 80 + "\n")
@@ -738,6 +737,26 @@ class VehicleSegmentationPipeline:
             print(f"✓ Dataset {metrica}: {output_path}")
             print(f"  Veículos: {df_data_final['veiculo_id'].n_unique():,}")
             print(f"  Registros: {len(df_data_final):,}")
+
+    def _write_manifest(self):
+        """Escreve manifest de versionamento com hash dos artefactos."""
+        key_files = [self.output_base_dir / "veiculos_segmentados_final.csv"]
+        for m in ("km", "h"):
+            p = self.dataset_dir / f"{m}.csv"
+            if p.exists():
+                key_files.append(p)
+        for stage in ("stage1", "stage2"):
+            model_dir = self.classification_dir / stage
+            if model_dir.exists():
+                key_files.extend(sorted(model_dir.glob("*.pkl")))
+                key_files.extend(sorted(model_dir.glob("*.onnx")))
+
+        manifest = PipelineManifest("segmentation", self.output_base_dir)
+        manifest.write(
+            output_hash=PipelineManifest.hash_files(*key_files),
+            config_hash=PipelineManifest.hash_config(self.filter_thresholds),
+        )
+        print(f"✓ Manifest: {manifest.path}")
 
 
 # ======================================================================

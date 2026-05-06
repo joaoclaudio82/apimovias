@@ -59,6 +59,16 @@ class VehicleMetadataResponse(BaseModel):
     quality_reason: Optional[str] = None
 
 
+class ProfileMetadataResponse(BaseModel):
+    """Metadados globais de um perfil."""
+    id: int
+    n_veiculos: int
+    dt_inicio: date
+    dt_fim: date
+    sample_size: int
+    created_at: str
+
+
 class VehicleInfoResponse(BaseModel):
     """Informações completas de um veículo para um target."""
     veiculo_id: int
@@ -66,3 +76,16 @@ class VehicleInfoResponse(BaseModel):
     profile: Optional[Dict[str, float]] = None
     metadata: Optional[VehicleMetadataResponse] = None
     message: Optional[str] = None
+
+
+class VehicleSummary(BaseModel):
+    """Resumo de um veículo na listagem."""
+    veiculo_id: int
+    quality: Optional[int] = None
+    quality_reason: Optional[str] = None
+    dt_inicio_km: Optional[date] = None
+    dt_fim_km: Optional[date] = None
+    upper_km: Optional[float] = None
+    dt_inicio_h: Optional[date] = None
+    dt_fim_h: Optional[date] = None
+    upper_h: Optional[float] = None

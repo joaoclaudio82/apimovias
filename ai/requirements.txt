@@ -24,3 +24,4 @@ streamlit>=1.52.1
 u8darts[all]
 polars>=1.35.0
 kneed>=0.8.5
+streamlit>=1.54.0

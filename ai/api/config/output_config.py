@@ -58,6 +58,10 @@ class OutputConfig(BaseModel):
     def training_dir(self, target: str) -> Path:
         """Diretório de logs e relatório de treinamento de um target."""
         return Path(self.logs.training) / target
+    
+    def predictions_path(self, target: str) -> Path:
+        """Diretório de predições de um target."""
+        return Path(self.logs.training) / target / "predictions"
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "OutputConfig":

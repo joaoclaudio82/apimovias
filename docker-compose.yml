@@ -71,5 +71,25 @@ services:
       timeout: 7s
       retries: 6
 
+  app:
+    build:
+      context: ./ai/moviasapp
+      dockerfile: Dockerfile
+    container_name: movias-app
+    restart: unless-stopped
+    environment:
+      API_URL: http://gateway:8000
+      API_PREFIX: /ai
+    ports:
+      - "${APP_PORT:-8501}:8501"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5)"]
+      interval: 20s
+      timeout: 7s
+      retries: 6
+
 volumes:
   ai-data:

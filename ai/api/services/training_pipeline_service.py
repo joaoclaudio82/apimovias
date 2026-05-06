@@ -18,7 +18,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from api.database import session_context
-from api.models import PipelineRun, PipelineStatus, PipelineStep, ModelType
+from api.models import PipelineRun, PipelineStatus, PipelineStep, ModelType, FinalStep
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,31 @@ def _resolve_pipeline_cls(model_type: str):
         ModelType.MOE: MoETrainingPipeline,
     }
     return mapping[model_type]
+
+
+# ------------------------------------------------------------------
+# Verificação de consistência da cadeia de artefactos
+# ------------------------------------------------------------------
+
+
+def _verify_artifact_chain(output_cfg, target: str) -> None:
+    """Verifica que segmentação → perfis → dataset estão consistentes.
+
+    Raises
+    ------
+    moviasai.versioning.StaleArtifactError
+        Se alguma ligação na cadeia estiver desatualizada.
+    FileNotFoundError
+        Se algum manifest não existir.
+    """
+    from moviasai.versioning import PipelineManifest
+
+    seg = PipelineManifest("segmentation", output_cfg.logs.segmentation)
+    prof = PipelineManifest("profiles", output_cfg.profile_dir(target))
+    ds = PipelineManifest("dataset", output_cfg.dataset_cache_dir(target))
+
+    PipelineManifest.verify_chain(seg, prof, ds)
+    logger.info("Cadeia de artefactos verificada para target=%s", target)
 
 
 # ------------------------------------------------------------------
@@ -146,9 +171,11 @@ def _segmentation_sync(target: str, data_path: str) -> dict:
     pipeline = VehicleSegmentationPipeline.from_config(df_daily, cfg, output_cfg, dq_cfg)
     results = pipeline.run()
 
+    # Manifest é escrito pelo próprio pipeline (segmentation_pipeline.py)
+
     return {
         "segmentation_dir": output_cfg.logs.segmentation,
-        "classification_dir": output_cfg.models.classification,
+        "models_dir": str(Path(output_cfg.logs.segmentation) / "models"),
         "train_data_dir": output_cfg.data.train_dataset,
     }
 
@@ -178,6 +205,7 @@ def _profiles_sync(target: str) -> dict:
     from api.config.output_config import OutputConfig
     from moviasai.data.utils import load_raw_data
     from moviasai.profiling.profile import VersionedVehicleProfile
+    from moviasai.versioning import PipelineManifest
 
     profile_cfg = VehicleProfileConfig.from_yaml(_config_path("vehicle_profile_config.yaml"))
     segmentation_cfg = SegmentationConfig.from_yaml(_config_path("segmentation_config.yaml"))
@@ -194,10 +222,24 @@ def _profiles_sync(target: str) -> dict:
         drop_duplicates=True,
     )
     profile.fit(df)
-    profile.save(str(output_cfg.profile_dir(target)))
+
+    profile_dir = output_cfg.profile_dir(target)
+    profile.save(str(profile_dir))
+
+    # Manifest: hash dos parquets gerados, com segmentação como parent
+    seg_manifest = PipelineManifest("segmentation", output_cfg.logs.segmentation)
+    profiles_manifest = PipelineManifest("profiles", profile_dir)
+    profiles_manifest.write(
+        output_hash=PipelineManifest.hash_files(
+            profile_dir / "vehicle_profiles.parquet",
+            profile_dir / "effective_periods.parquet",
+            profile_dir / "metadata.json",
+        ),
+        parent=seg_manifest,
+    )
 
     return {
-        "profile_dir": str(output_cfg.profile_dir(target)),
+        "profile_dir": str(profile_dir),
     }
 
 
@@ -206,26 +248,27 @@ def _profiles_sync(target: str) -> dict:
 # ------------------------------------------------------------------
 
 
-async def run_dataset(run_id: int, target: str):
+async def run_dataset(run_id: int, target: str, use_cache: bool = True):
     """Gera datasets de treinamento para o target."""
     import asyncio
 
     await _mark_running(run_id)
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, _dataset_sync, target)
+        result = await loop.run_in_executor(None, _dataset_sync, target, use_cache)
         await _mark_completed(run_id, artifacts=result)
     except Exception:
         await _mark_failed(run_id, traceback.format_exc())
         raise
 
 
-def _dataset_sync(target: str) -> dict:
+def _dataset_sync(target: str, use_cache: bool = True) -> dict:
     from api.config.dataset_config import DatasetConfig
     from api.config.output_config import OutputConfig
     from moviasai.data.utils import load_raw_data
     from moviasai.data.dataset import ProfileDatasetGenerator
     from moviasai.profiling.profile import VersionedVehicleProfile
+    from moviasai.versioning import PipelineManifest
 
     dataset_cfg = DatasetConfig.from_yaml(_config_path("dataset_config.yaml"))
     output_cfg = OutputConfig.from_yaml(_config_path("output_config.yaml"))
@@ -237,6 +280,7 @@ def _dataset_sync(target: str) -> dict:
 
     df_daily = load_raw_data(output_cfg.train_data_path(target), target=target).to_pandas()
 
+    cache_dir = output_cfg.dataset_cache_dir(target) if use_cache else None
     generator = ProfileDatasetGenerator(
         vehicle_profile=profile,
         df_daily=df_daily,
@@ -245,11 +289,21 @@ def _dataset_sync(target: str) -> dict:
         horizon_weeks=dataset_cfg.horizon_weeks,
         daily_horizon=dataset_cfg.daily_horizon,
         min_recent_active_days=dataset_cfg.min_recent_active_days,
-        cache_dir=output_cfg.dataset_cache_dir(target),
+        cache_dir=cache_dir,
         cluster_features=dataset_cfg.cluster_features,
     )
 
     dataset = generator.generate()
+
+    # Manifest: usa o hash de dados já calculado pelo generator, com perfis como parent
+    prof_manifest = PipelineManifest("profiles", output_cfg.profile_dir(target))
+    ds_output_dir = cache_dir or output_cfg.dataset_cache_dir(target)
+    ds_manifest = PipelineManifest("dataset", ds_output_dir)
+    ds_manifest.write(
+        output_hash=generator._compute_data_hash(),
+        config_hash=PipelineManifest.hash_config(generator.config),
+        parent=prof_manifest,
+    )
 
     return {
         "cache_dir": str(output_cfg.dataset_cache_dir(target)),
@@ -267,6 +321,12 @@ def _dataset_sync(target: str) -> dict:
 async def run_optimization(run_id: int, target: str, model_type: str):
     """Otimiza hiperparâmetros e retreina o modelo final."""
     import asyncio
+    from datetime import date as _date, datetime as _datetime
+
+    from sqlalchemy import select as sa_select
+
+    from api.database import session_context
+    from api.models import ActiveModel
 
     await _mark_running(run_id)
     try:
@@ -274,7 +334,34 @@ async def run_optimization(run_id: int, target: str, model_type: str):
         result = await loop.run_in_executor(
             None, _optimization_sync, target, model_type,
         )
-        await _mark_completed(run_id, metrics=result["metrics"], artifacts=result["artifacts"])
+
+        # Registar/atualizar modelo vigente na DB
+        artifacts = result["artifacts"]
+        async with session_context() as session:
+            res = await session.execute(
+                sa_select(ActiveModel).where(ActiveModel.target == target)
+            )
+            active = res.scalar_one_or_none()
+            trained_at = _date.today()
+
+            if active is None:
+                active = ActiveModel(
+                    target=target,
+                    filename=artifacts["dated_filename"],
+                    model_type=model_type,
+                    version_id=artifacts.get("version_id"),
+                    trained_at=trained_at,
+                )
+                session.add(active)
+            else:
+                active.filename = artifacts["dated_filename"]
+                active.model_type = model_type
+                active.version_id = artifacts.get("version_id")
+                active.trained_at = trained_at
+                active.activated_at = _datetime.utcnow()
+            await session.commit()
+
+        await _mark_completed(run_id, metrics=result["metrics"], artifacts=artifacts)
     except Exception:
         await _mark_failed(run_id, traceback.format_exc())
         raise
@@ -288,11 +375,15 @@ def _optimization_sync(target: str, model_type: str) -> dict:
     from api.config.optimization_config import OptimizationConfig
     from moviasai.data.utils import load_raw_data
     from moviasai.forecasting.optimization import HyperparameterOptimizer
+    from moviasai.versioning import PipelineManifest
 
     dataset_cfg = DatasetConfig.from_yaml(_config_path("dataset_config.yaml"))
     training_cfg = TrainingConfig.from_yaml(_config_path("training_config.yaml"))
     model_cfg = ModelConfig.from_yaml(_config_path("model_config.yaml"))
     output_cfg = OutputConfig.from_yaml(_config_path("output_config.yaml"))
+
+    # Verificar consistência da cadeia de artefactos
+    _verify_artifact_chain(output_cfg, target)
     optuna_cfg = OptimizationConfig.from_yaml(_config_path("optimization_config.yaml"))
 
     pipeline_cls = _resolve_pipeline_cls(model_type)
@@ -313,6 +404,22 @@ def _optimization_sync(target: str, model_type: str) -> dict:
     study = optimizer.optimize()
     pipeline = optimizer.retrain_best(max_epochs=training_cfg.trainer.max_epochs)
 
+    # Criar bundle versionado
+    from moviasai.bundle import ModelBundle
+    from pathlib import Path as _Path
+
+    onnx_source = pipeline.exported_onnx_path
+    seg_models_dir = _Path(output_cfg.logs.segmentation) / "models"
+
+    bundle = ModelBundle.create(
+        base_dir=_Path(output_cfg.models.forecasting),
+        target=target,
+        model_type=model_type,
+        onnx_source=onnx_source,
+        segmentation_models_dir=seg_models_dir,
+        config_dir=_Path(_CONFIG_DIR),
+    )
+
     # Extrair métricas serializáveis
     metrics_out = {}
     if pipeline.metrics:
@@ -321,9 +428,7 @@ def _optimization_sync(target: str, model_type: str) -> dict:
                 continue
             maint = pipeline.metrics[split_name]["maintenance"]
             metrics_out[split_name] = {}
-            for k_label in ("k2", "k3", "k4"):
-                if k_label not in maint:
-                    continue
+            for k_label in sorted(maint.keys()):
                 m = maint[k_label]
                 metrics_out[split_name][k_label] = {
                     "mean_error": float(m["mean_error"]),
@@ -343,6 +448,140 @@ def _optimization_sync(target: str, model_type: str) -> dict:
             "training_dir": str(output_cfg.training_dir(target)),
             "model_dir": output_cfg.models.forecasting,
             "model_type": model_type,
+            "version_id": bundle.version_id,
+            "dated_filename": onnx_source.name,
+            "trained_at": bundle.version_id.split("_")[0],
+        },
+    }
+
+
+# ------------------------------------------------------------------
+# 4b. TREINAMENTO DIRETO (sem otimização)
+# ------------------------------------------------------------------
+
+
+async def run_training(run_id: int, target: str, model_type: str):
+    """Treina o modelo diretamente com hiperparâmetros dos ficheiros de configuração."""
+    import asyncio
+    from datetime import date as _date, datetime as _datetime
+
+    from sqlalchemy import select as sa_select
+
+    from api.database import session_context
+    from api.models import ActiveModel
+
+    await _mark_running(run_id)
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, _training_sync, target, model_type,
+        )
+
+        # Registar/atualizar modelo vigente na DB
+        artifacts = result["artifacts"]
+        async with session_context() as session:
+            res = await session.execute(
+                sa_select(ActiveModel).where(ActiveModel.target == target)
+            )
+            active = res.scalar_one_or_none()
+            trained_at = _date.today()
+
+            if active is None:
+                active = ActiveModel(
+                    target=target,
+                    filename=artifacts["dated_filename"],
+                    model_type=model_type,
+                    version_id=artifacts.get("version_id"),
+                    trained_at=trained_at,
+                )
+                session.add(active)
+            else:
+                active.filename = artifacts["dated_filename"]
+                active.model_type = model_type
+                active.version_id = artifacts.get("version_id")
+                active.trained_at = trained_at
+                active.activated_at = _datetime.utcnow()
+            await session.commit()
+
+        await _mark_completed(run_id, metrics=result["metrics"], artifacts=artifacts)
+    except Exception:
+        await _mark_failed(run_id, traceback.format_exc())
+        raise
+
+
+def _training_sync(target: str, model_type: str) -> dict:
+    from api.config.dataset_config import DatasetConfig
+    from api.config.training_config import TrainingConfig
+    from api.config.model_config import ModelConfig
+    from api.config.output_config import OutputConfig
+    from moviasai.data.utils import load_raw_data
+    from moviasai.versioning import PipelineManifest
+
+    dataset_cfg = DatasetConfig.from_yaml(_config_path("dataset_config.yaml"))
+    training_cfg = TrainingConfig.from_yaml(_config_path("training_config.yaml"))
+    model_cfg = ModelConfig.from_yaml(_config_path("model_config.yaml"))
+    output_cfg = OutputConfig.from_yaml(_config_path("output_config.yaml"))
+
+    # Verificar consistência da cadeia de artefactos
+    _verify_artifact_chain(output_cfg, target)
+
+    pipeline_cls = _resolve_pipeline_cls(model_type)
+
+    df_daily = load_raw_data(output_cfg.train_data_path(target), target=target)
+
+    pipeline = pipeline_cls.from_config(
+        df_daily=df_daily.to_pandas() if hasattr(df_daily, "to_pandas") else df_daily,
+        dataset_cfg=dataset_cfg,
+        training_cfg=training_cfg,
+        model_cfg=model_cfg,
+        output_config=output_cfg,
+        target=target,
+    )
+
+    metrics = pipeline.run()
+
+    # Criar bundle versionado
+    from moviasai.bundle import ModelBundle
+
+    onnx_source = pipeline.exported_onnx_path
+    seg_models_dir = Path(output_cfg.logs.segmentation) / "models"
+
+    bundle = ModelBundle.create(
+        base_dir=Path(output_cfg.models.forecasting),
+        target=target,
+        model_type=model_type,
+        onnx_source=onnx_source,
+        segmentation_models_dir=seg_models_dir,
+        config_dir=Path(_CONFIG_DIR),
+    )
+
+    # Extrair métricas serializáveis
+    metrics_out = {}
+    if metrics:
+        for split_name in ("val", "test"):
+            if split_name not in metrics:
+                continue
+            maint = metrics[split_name]["maintenance"]
+            metrics_out[split_name] = {}
+            for k_label in sorted(maint.keys()):
+                m = maint[k_label]
+                metrics_out[split_name][k_label] = {
+                    "mean_error": float(m["mean_error"]),
+                    "mae_days": float(m["mae_days"]),
+                    "p90_error": float(m["p90_error"]),
+                    "pct_late": float(m["pct_late"]),
+                    "pct_early": float(m["pct_early"]),
+                }
+
+    return {
+        "metrics": metrics_out,
+        "artifacts": {
+            "training_dir": str(output_cfg.training_dir(target)),
+            "model_dir": output_cfg.models.forecasting,
+            "model_type": model_type,
+            "version_id": bundle.version_id,
+            "dated_filename": onnx_source.name,
+            "trained_at": bundle.version_id.split("_")[0],
         },
     }
 
@@ -358,32 +597,46 @@ async def run_full_pipeline(
     target: str,
     data_path: str,
     model_type: str,
+    final_step: str = "optimization",
 ) -> list[int]:
     """
-    Cria os 4 PipelineRun e submete uma task que os executa em sequência.
+    Cria os PipelineRun e submete uma task que os executa em sequência.
+
+    Parameters
+    ----------
+    final_step : str
+        ``'optimization'`` ou ``'training'``. Determina a etapa final.
 
     Retorna a lista de run_ids criados.
     """
     from api.services import task_manager
 
+    if final_step == FinalStep.TRAINING:
+        final_pipeline_step = PipelineStep.TRAINING
+    else:
+        final_pipeline_step = PipelineStep.OPTIMIZATION
+
     steps = [
         PipelineStep.SEGMENTATION,
         PipelineStep.PROFILES,
         PipelineStep.DATASET,
-        PipelineStep.OPTIMIZATION,
+        final_pipeline_step,
     ]
     run_ids = []
     for step in steps:
-        mt = model_type if step == PipelineStep.OPTIMIZATION else None
+        mt = model_type if step in (PipelineStep.OPTIMIZATION, PipelineStep.TRAINING) else None
         run_ids.append(await _create_run(step, target, model_type=mt))
 
     async def _sequential():
-        seg_id, prof_id, ds_id, opt_id = run_ids
+        seg_id, prof_id, ds_id, final_id = run_ids
         try:
             await run_segmentation(seg_id, target, data_path)
             await run_profiles(prof_id, target)
             await run_dataset(ds_id, target)
-            await run_optimization(opt_id, target, model_type)
+            if final_step == FinalStep.TRAINING:
+                await run_training(final_id, target, model_type)
+            else:
+                await run_optimization(final_id, target, model_type)
         except Exception:
             logger.exception("Pipeline completo falhou para %s", target)
 
