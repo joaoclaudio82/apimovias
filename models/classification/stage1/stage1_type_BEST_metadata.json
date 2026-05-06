@@ -1,6 +1,6 @@
 {
   "name": "stage1_type",
-  "n_samples": 7870,
+  "n_samples": 7756,
   "n_features": 3,
   "n_classes": 2,
   "feature_names": [
@@ -12,5 +12,5 @@
     0,
     1
   ],
-  "timestamp": "2026-04-26T01:07:57.947125"
+  "timestamp": "2026-04-28T16:08:12.657942"
 }
