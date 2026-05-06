@@ -1,0 +1,85 @@
+# ============================================================
+# CONFIGURAÇÃO COMPLETA — OPTUNA (MODO FAST)
+# ============================================================
+# Objetivo: acelerar trials e otimizar risco de atraso (k=2)
+# NÃO usar este arquivo para treino final / produção
+# ============================================================
+
+# ------------------------------------------------------------
+# Trainer (PyTorch Lightning) — AJUSTADO PARA OPTUNA
+# ------------------------------------------------------------
+trainer:
+  # Epochs máximos por trial (controle grosso)
+  max_epochs: 25
+  accelerator: auto
+  # Mixed precision para acelerar (GPU)
+  precision: 16-mixed
+  gradient_clip_val: 1.0
+  # Early stopping AGRESSIVO (crítico para Optuna)
+  early_stopping:
+    monitor: train_loss
+    patience: 3
+    min_delta: 1.0e-4
+  # Checkpoint desabilitado durante Optuna (evita I/O)
+  checkpoint:
+    save_top_k: 0
+
+# ------------------------------------------------------------
+# DataModule (ForecastingDataModule)
+# ------------------------------------------------------------
+data:
+  # Batch maior para acelerar cada epoch
+  batch_size: 128
+  # Workers > 0 acelera carregamento (Linux / ambiente estável)
+  # Se houver problemas, usar 0
+  num_workers: 0
+
+# ============================================================
+# CONFIGURAÇÃO DA OTIMIZAÇÃO DE HIPERPARÂMETROS (OPTUNA)
+# ============================================================
+
+# Número de trials
+n_trials: 30
+
+# Epochs máximos por trial (reforço de segurança)
+max_epochs_per_trial: 25
+
+# Seed global (reprodutibilidade)
+seed: 13
+
+# ------------------------------------------------------------
+# Função objetivo (DECISÃO DE MANUTENÇÃO)
+# ------------------------------------------------------------
+objective:
+  # Horizonte crítico (k semanas)
+  k_target: 2
+  # Peso do MAE na métrica composta:
+  # objective = P90_k + mae_weight × MAE_k
+  mae_weight: 0.5
+  # Penalização de viés de atraso:
+  # bias_penalty = bias_weight × max(mean_error_k, 0)
+  bias_weight: 0.3
+  # Restrição dura de segurança para médio prazo (k=3)
+  # Trials com P90_k3 > max_p90_k3 são rejeitados
+  max_p90_k3: 1.0
+
+# ------------------------------------------------------------
+# Espaço de busca de hiperparâmetros
+# ------------------------------------------------------------
+search_space:
+  # PRIORIDADE ALTA — maior impacto
+  alpha_daily:
+    low: 0.05
+    high: 0.6
+  lr:
+    low: 3.0e-4
+    high: 3.0e-3
+
+  # PRIORIDADE MÉDIA
+  hidden_dim: [32, 64, 96]
+  conv_filters: [16, 32, 48]
+
+  # PRIORIDADE BAIXA (regularização)
+  dropout:
+    low: 0.0
+    high: 0.25

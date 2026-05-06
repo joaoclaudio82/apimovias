@@ -1,0 +1,42 @@
+# config/segmentation_config.yaml
+
+# ============================================================
+# CONFIGURAÇÃO DO PIPELINE DE SEGMENTAÇÃO DE VEÍCULOS
+# ============================================================
+# Pipeline: features → anomalias → clustering → classificação → relatório
+
+# ---- Features ----
+features:
+  type: ["razao_km_h", "proporcao_km", "corr_km_h"]
+  km:
+    seg: ["gap_medio", "cv_gaps", "taxa_dias_ativos", "p75", "iqr"]
+  h:
+    seg: ["gap_medio", "cv_gaps", "taxa_dias_ativos", "p75", "iqr"]
+
+# ---- Etapa 1: Clustering de métrica predominante (KM vs H) ----
+stage1:
+  clustering:
+    k: 2                      # Número fixo de clusters (null para auto)
+    k_range: [2, 10]          # Range de busca se k=null
+
+  classification:
+    test_size: 0.3            # Proporção de teste
+    percentile_clean: 0.10    # Percentil para limpeza de ruído
+
+  # Limiares de incerteza para separação KM/H
+  uncertainty:
+    low_pct: 0.05             # Percentil baixo para p_km
+    high_pct: 0.95            # Percentil alto para p_km
+
+# ---- Etapa 2: Clustering de segmentação por métrica ----
+stage2:
+  clustering:
+    k: null                   # null = auto (elbow/silhouette)
+    k_range: [2, 8]           # Range de busca
+
+  classification:
+    test_size: 0.3            # Proporção de teste
+
+# ---- Relatório PDF ----
+report:
+  enabled: true               # Gerar relatório PDF

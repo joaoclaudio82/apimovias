@@ -1,0 +1,20 @@
+# config/data_quality_config.yaml
+
+# ============================================================
+# CONFIGURAÇÃO DE QUALIDADE DE DADOS
+# ============================================================
+# Limiares de qualidade e quantis para detecção de anomalias.
+
+# ---- Limiares de qualidade (SeriesQualityFilter) ----
+thresholds:
+  min_weeks: 12                # Mínimo de semanas ativas
+  max_gap: 4                  # Gap máximo permitido (dias)
+
+# ---- Quantis para cálculo de limiares ----
+quantiles:
+  prop_km_high: 0.90
+  prop_h_low: 0.05
+  corr_low: 0.10
+  taxa_dias_low: 0.05
+  gap_medio_high: 0.95
+  cv_gaps_high: 0.95
