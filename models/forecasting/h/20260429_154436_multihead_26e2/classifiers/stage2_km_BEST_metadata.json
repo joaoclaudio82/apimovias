@@ -1,0 +1,19 @@
+{
+  "name": "stage2_km",
+  "n_samples": 6649,
+  "n_features": 5,
+  "n_classes": 3,
+  "feature_names": [
+    "seg_gap_medio_km",
+    "seg_cv_gaps_km",
+    "seg_taxa_dias_ativos_km",
+    "seg_p75_km",
+    "seg_iqr_km"
+  ],
+  "classes": [
+    0,
+    1,
+    2
+  ],
+  "timestamp": "2026-04-29T11:47:21.665636"
+}

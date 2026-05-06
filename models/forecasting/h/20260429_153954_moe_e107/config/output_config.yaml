@@ -1,0 +1,25 @@
+# config/output_config.yaml
+
+# ============================================================
+# CONFIGURAÇÃO DE DIRETÓRIOS DE SAÍDA
+# ============================================================
+# Centraliza os caminhos de saída das pipelines e modelos.
+# Todos os caminhos são relativos a 'root' (que é relativo a este YAML).
+
+root: "../.."
+
+# ---- Dados ----
+data:
+  train_dataset: "data/train_data"
+  profiles: "data/profiles"
+  cache: "data/.dataset_cache"
+
+# ---- Logs e arquivos gerados ----
+logs:
+  segmentation: "logs/segmentation"
+  training: "logs/training"
+
+# ---- Modelos gerados ----
+models:
+  classification: "models/classification"
+  forecasting: "models/forecasting"

@@ -1,0 +1,27 @@
+# ============================================================
+# CONFIGURAÇÃO DO MODELO DE PREVISÃO
+# ============================================================
+
+# ---- Modelo ----
+model:
+  # Encoder estrutural (MLP)
+  hidden_dim: 64
+  dropout: 0.1
+
+  # Encoder temporal (Conv1D)
+  conv_filters: 32
+  conv_kernel: 3
+  conv_layers: 2
+
+  # Funções de perda: 'huber', 'mse' ou 'mae'
+  loss_heads_type: huber
+  loss_daily_type: mae
+
+  # Peso da perda diária na perda total
+  # loss = loss_heads + alpha_daily * loss_daily
+  alpha_daily: 0.3
+
+# ---- Otimizador (AdamW) ----
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 1.0e-4

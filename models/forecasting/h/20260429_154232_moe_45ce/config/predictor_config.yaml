@@ -1,0 +1,21 @@
+# config/predictor_config.yaml
+
+# ============================================================
+# CONFIGURAÇÃO DO PREDICTOR (MODELOS DEFAULT)
+# ============================================================
+# Define os modelos ONNX default para predição de cada métrica.
+# Os caminhos são relativos ao diretório models.forecasting do output_config.
+#
+# NOTA: Estes valores são usados apenas como fallback quando não há
+# modelo vigente registado na tabela active_models da base de dados.
+# Para trocar o modelo vigente em produção, use:
+#   PUT /pipeline/models/active  (com target, trained_at e model_type)
+# Para consultar os modelos vigentes:
+#   GET /pipeline/models/active
+#
+# Na primeira consulta, se a tabela active_models estiver vazia,
+# o sistema regista automaticamente estes defaults.
+
+models:
+  km: "forecasting_moe_km.onnx"
+  h: "forecasting_moe_h.onnx"

@@ -1,0 +1,55 @@
+# config/training_config.yaml
+
+# ============================================================
+# CONFIGURAÇÃO DE TREINAMENTO (normalização + split)
+# ============================================================
+
+# ---- Normalização (ProfileDatasetNormalizer) ----
+normalization:
+  cv_max: 5.0                 # Limite de clip para CV antes de log1p
+  ratio_max: 5.0              # Limite de clip para razões antes de log1p
+
+# ---- Split temporal (treino / validação / teste) ----
+split:
+  val_size: 0.15              # Fração para validação (0.0 para desativar)
+  test_size: 0.15             # Fração para teste (0.0 para desativar)
+  shuffle: false               # Shuffle dentro de cada subset
+  random_state: 13            # Seed para reprodutibilidade do shuffle
+
+# Seed global para reprodutibilidade
+seed: 13
+
+# ---- Hiperparâmetros salvos ----
+# Se true, usa os hiperparâmetros salvos de uma otimização anterior
+# em vez de executar nova busca.
+use_saved_hyperparameters: true
+
+# ---- DataModule (ForecastingDataModule) ----
+data:
+  batch_size: 64
+  num_workers: 0
+
+# ---- Trainer (PyTorch Lightning) ----
+trainer:
+  max_epochs: 100
+  accelerator: auto
+  precision: 32
+  gradient_clip_val: 1.0
+
+  # Early stopping
+  early_stopping:
+    monitor: val_loss
+    patience: 10
+    min_delta: 1.0e-10
+
+  # Model checkpoint (melhor modelo por val_loss)
+  checkpoint:
+    monitor: val_loss
+    save_top_k: 1
+    mode: min
+
+# ---- Exportação ONNX ----
+onnx:
+  enabled: true
+  opset_version: 18
+  verify: true

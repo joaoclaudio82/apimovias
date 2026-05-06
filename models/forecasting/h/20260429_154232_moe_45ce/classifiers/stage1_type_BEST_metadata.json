@@ -1,0 +1,16 @@
+{
+  "name": "stage1_type",
+  "n_samples": 7756,
+  "n_features": 3,
+  "n_classes": 2,
+  "feature_names": [
+    "razao_km_h",
+    "proporcao_km",
+    "corr_km_h"
+  ],
+  "classes": [
+    0,
+    1
+  ],
+  "timestamp": "2026-04-29T11:46:58.827695"
+}
