@@ -65,6 +65,16 @@ def get_vehicle_info(veiculo_id: int, target: str) -> Dict:
     return _get(_p(f"/profiling/vehicle/{veiculo_id}"), target=target)
 
 
+def get_vehicle_history(veiculo_id: int, target: str) -> List[Dict] | None:
+    """Retorna a série histórica diária de um veículo para o target."""
+    try:
+        return _get(_p(f"/profiling/vehicle/{veiculo_id}/history"), target=target)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None
+        raise
+
+
 def get_profile_metadata(last: bool = False) -> List[Dict]:
     return _get(_p("/profiling/metadata"), last=str(last).lower())
 

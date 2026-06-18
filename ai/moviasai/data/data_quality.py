@@ -18,6 +18,7 @@ class SeriesQuality(IntEnum):
     OUTLIER = 1
     NOT_MODELABLE = 2
     EMPTY = 3
+    SINGLE_TARGET = 4
 
 
 class SeriesQualityFilter:
@@ -363,8 +364,11 @@ class DataQualityEvaluator:
 
         output_dir = Path(output_dir) if output_dir else None
 
-        # 0. Remover veículos com séries vazias (só zeros em km e h)
-        df_daily, empty_ids = self._detect_empty_series(df_daily, verbose=verbose)
+        # 0. Identificar veículos vazios e single-target
+        df_daily, empty_ids, km_only_ids, h_only_ids = self._detect_empty_series(
+            df_daily, verbose=verbose,
+        )
+        single_target_ids = km_only_ids | h_only_ids
 
         # 1. Formatação
         formatter_km = SeriesQualityFilter(df=df_daily, target="km", **self.filter_thresholds)
@@ -379,11 +383,19 @@ class DataQualityEvaluator:
         formatted_ids = set(df_formatted["veiculo_id"].unique().to_list())
         failed_ids = (all_ids - formatted_ids) - empty_ids
 
+        # Single-target vehicles que falharam na formatação de ambos os targets
+        # são genuinamente não-modeláveis; os que passaram no target válido continuam
+        truly_failed_ids = failed_ids - single_target_ids
+        # Single-target que falharam: verificar se passaram no target disponível
+        single_failed_ids = failed_ids & single_target_ids
+
         if verbose:
             print(f"\n📊 Análise de formatação:")
             print(f"  • Veículos totais: {len(all_ids):,}")
             print(f"  • Veículos formatados: {len(formatted_ids):,}")
             print(f"  • Veículos que falharam: {len(failed_ids):,}")
+            if single_target_ids:
+                print(f"  • Veículos single-target: {len(single_target_ids):,}")
 
         min_weeks = self.filter_thresholds["min_weeks"]
         max_gap = self.filter_thresholds["max_gap"]
@@ -394,43 +406,70 @@ class DataQualityEvaluator:
             excluded_results.append(pd.DataFrame({
                 "veiculo_id": list(empty_ids),
                 "quality": SeriesQuality.EMPTY,
-                "quality_reason": "Série vazia (km=0 ou h=0)",
+                "quality_reason": "Série vazia (km=0 e h=0)",
             }))
-        if failed_ids:
+        if truly_failed_ids:
             reason = f"Série com min_weeks < {min_weeks} ou max_gap > {max_gap}"
             excluded_results.append(pd.DataFrame({
-                "veiculo_id": list(failed_ids),
+                "veiculo_id": list(truly_failed_ids),
+                "quality": SeriesQuality.NOT_MODELABLE,
+                "quality_reason": reason,
+            }))
+        if single_failed_ids:
+            reason = f"Single-target: falhou min_weeks < {min_weeks} ou max_gap > {max_gap}"
+            excluded_results.append(pd.DataFrame({
+                "veiculo_id": list(single_failed_ids),
                 "quality": SeriesQuality.NOT_MODELABLE,
                 "quality_reason": reason,
             }))
         df_failed_results = pd.concat(excluded_results) if excluded_results else pd.DataFrame()
 
         if verbose and len(df_failed_results):
-            print(f"  • Marcados como não-modeláveis: {len(df_failed_results):,}")
+            print(f"  • Marcados como não-modeláveis/vazios: {len(df_failed_results):,}")
 
         if verbose:
             print()
 
         # 3. Fit + avaliação nos restantes
-        excluded_ids = failed_ids | empty_ids
+        excluded_ids = truly_failed_ids | single_failed_ids | empty_ids
         mask_not_failed = ~df_features["veiculo_id"].isin(excluded_ids)
-        self._compute_thresholds(df_features[mask_not_failed], verbose=verbose)
+        self._compute_thresholds(
+            df_features[mask_not_failed & ~df_features["veiculo_id"].isin(single_target_ids)],
+            verbose=verbose,
+        )
         df_not_failed_results = self._evaluate_batch(
-            df_features[mask_not_failed], verbose=verbose,
+            df_features[mask_not_failed],
+            single_target_ids=single_target_ids,
+            verbose=verbose,
         )
 
         # 4. Combinar resultados
         df_results = pd.concat([df_failed_results, df_not_failed_results])
         df_annotated = df_features.merge(df_results, on="veiculo_id")
 
+        # Adicionar coluna available_targets para todos os veículos
+        def _available_targets(vid):
+            if vid in km_only_ids:
+                return "km"
+            if vid in h_only_ids:
+                return "h"
+            if vid in empty_ids:
+                return ""
+            return "km,h"
+
+        df_annotated["available_targets"] = df_annotated["veiculo_id"].map(_available_targets)
+
         # 5. Persistência
         if output_dir:
             self._save_artifacts(
-                df_annotated, output_dir, all_ids, formatted_ids, failed_ids,
+                df_annotated, output_dir, all_ids, formatted_ids,
+                truly_failed_ids | single_failed_ids,
             )
 
-        # 6. Separar válidos
-        df_clean = df_annotated[df_annotated["quality"] == SeriesQuality.VALID].copy()
+        # 6. Separar válidos (VALID + SINGLE_TARGET participam do pipeline)
+        df_clean = df_annotated[
+            df_annotated["quality"].isin([SeriesQuality.VALID, SeriesQuality.SINGLE_TARGET])
+        ].copy()
 
         return df_annotated, df_clean
 
@@ -441,34 +480,56 @@ class DataQualityEvaluator:
     @staticmethod
     def _detect_empty_series(
         df_daily: pl.DataFrame, verbose: bool = True,
-    ) -> Tuple[pl.DataFrame, set]:
+    ) -> Tuple[pl.DataFrame, set, set, set]:
         """
-        Remove veículos cujos targets (km e h) são todos zero.
+        Identifica veículos com séries vazias e single-target.
+
+        Veículos com ambos os targets a zero são removidos.
+        Veículos com apenas um target válido são mantidos e sinalizados.
 
         Returns
         -------
-        (df_filtered, empty_ids)
-            ``df_filtered``: ``df_daily`` sem os veículos vazios.
-            ``empty_ids``: conjunto de ``veiculo_id`` removidos.
+        (df_filtered, empty_ids, km_only_ids, h_only_ids)
+            ``df_filtered``: ``df_daily`` sem os veículos totalmente vazios.
+            ``empty_ids``: ``veiculo_id`` com km=0 E h=0.
+            ``km_only_ids``: ``veiculo_id`` com km>0 mas h=0.
+            ``h_only_ids``: ``veiculo_id`` com h>0 mas km=0.
         """
         df_max = (
             df_daily
             .group_by("veiculo_id")
             .agg([
-                pl.col("km_dia_clean").max().alias("max_km"),
-                pl.col("h_dia_clean").max().alias("max_h"),
+                pl.col("km_dia_clean").fill_null(0).max().alias("max_km"),
+                pl.col("h_dia_clean").fill_null(0).max().alias("max_h"),
             ])
         )
+        # Totalmente vazios: ambos os targets a zero
         empty_vehicles = df_max.filter(
-            (pl.col("max_km") == 0) | (pl.col("max_h") == 0)
+            (pl.col("max_km") == 0) & (pl.col("max_h") == 0)
         )
         empty_ids = set(empty_vehicles["veiculo_id"].to_list())
 
-        if verbose and empty_ids:
-            print(f"🗑️  Séries vazias (km=0 e h=0): {len(empty_ids):,} veículos removidos")
+        # Single-target: apenas um dos targets com dados
+        km_only = df_max.filter(
+            (pl.col("max_km") > 0) & (pl.col("max_h") == 0)
+        )
+        km_only_ids = set(km_only["veiculo_id"].to_list())
+
+        h_only = df_max.filter(
+            (pl.col("max_km") == 0) & (pl.col("max_h") > 0)
+        )
+        h_only_ids = set(h_only["veiculo_id"].to_list())
+
+        if verbose:
+            if empty_ids:
+                print(f"🗑️  Séries vazias (km=0 e h=0): {len(empty_ids):,} veículos removidos")
+            if km_only_ids:
+                print(f"⚡ Single-target KM (h=0): {len(km_only_ids):,} veículos")
+            if h_only_ids:
+                print(f"⚡ Single-target H (km=0): {len(h_only_ids):,} veículos")
 
         df_filtered = df_daily.filter(~pl.col("veiculo_id").is_in(empty_ids))
-        return df_filtered, empty_ids
+        return df_filtered, empty_ids, km_only_ids, h_only_ids
 
     def _get_feature_name(self, extractor: BaseFeatureExtractor, canonical_name: str) -> Optional[str]:
         if not extractor:
@@ -550,43 +611,68 @@ class DataQualityEvaluator:
             print()
             print("=" * 80)
 
-    def _evaluate_single(self, features: pd.Series) -> dict:
-        """Avalia qualidade de um único veículo."""
+    def _evaluate_single(self, features: pd.Series, is_single_target: bool = False) -> dict:
+        """Avalia qualidade de um único veículo.
+
+        Parameters
+        ----------
+        features : pd.Series
+            Features do veículo.
+        is_single_target : bool
+            Se True, ignora regras que cruzam km e h (regras 1 e 2)
+            e só avalia o target disponível na regra 3.
+        """
         quality = SeriesQuality.VALID
         reason = None
 
         prop_km = self._get_feature_name(self.type_extractor, 'proporcao_km')
         corr_km_h = self._get_feature_name(self.type_extractor, 'corr_km_h')
 
-        # Regra 1: Inconsistência física
-        if (prop_km and prop_km in features.index
-                and self.computed_thresholds.get("prop_km_high") is not None
-                and self.computed_thresholds.get("prop_h_low") is not None):
-            prop_km_val = features[prop_km]
-            prop_h_val = 1 - prop_km_val
-            if prop_km_val > self.computed_thresholds["prop_km_high"] and prop_h_val < self.computed_thresholds["prop_h_low"]:
-                quality = SeriesQuality.OUTLIER
-                reason = "Inconsistência física: KM sem H"
+        # Regras 1 e 2 só fazem sentido para veículos com ambos os targets
+        if not is_single_target:
+            # Regra 1: Inconsistência física
+            if (prop_km and prop_km in features.index
+                    and self.computed_thresholds.get("prop_km_high") is not None
+                    and self.computed_thresholds.get("prop_h_low") is not None):
+                prop_km_val = features[prop_km]
+                prop_h_val = 1 - prop_km_val
+                if prop_km_val > self.computed_thresholds["prop_km_high"] and prop_h_val < self.computed_thresholds["prop_h_low"]:
+                    quality = SeriesQuality.OUTLIER
+                    reason = "Inconsistência física: KM sem H"
 
-        # Regra 2: Tipo contraditório
-        if (quality == SeriesQuality.VALID and prop_km and corr_km_h
-                and prop_km in features.index and corr_km_h in features.index
-                and self.computed_thresholds.get("prop_km_high") is not None
-                and self.computed_thresholds.get("corr_low") is not None):
-            if features[prop_km] > self.computed_thresholds["prop_km_high"] and features[corr_km_h] < self.computed_thresholds["corr_low"]:
-                quality = SeriesQuality.OUTLIER
-                reason = "Tipo contraditório: KM sem correlação com H"
+            # Regra 2: Tipo contraditório
+            if (quality == SeriesQuality.VALID and prop_km and corr_km_h
+                    and prop_km in features.index and corr_km_h in features.index
+                    and self.computed_thresholds.get("prop_km_high") is not None
+                    and self.computed_thresholds.get("corr_low") is not None):
+                if features[prop_km] > self.computed_thresholds["prop_km_high"] and features[corr_km_h] < self.computed_thresholds["corr_low"]:
+                    quality = SeriesQuality.OUTLIER
+                    reason = "Tipo contraditório: KM sem correlação com H"
 
-        # Regra 3: Série não-modelável
+        # Regra 3: Série não-modelável — apenas para o(s) target(s) disponível(is)
         if quality == SeriesQuality.VALID:
-            checks = [
-                (self.km_extractor, 'taxa_dias_ativos', 'taxa_dias_low_km', '<'),
-                (self.h_extractor, 'taxa_dias_ativos', 'taxa_dias_low_h', '<'),
-                (self.km_extractor, 'gap_medio', 'gap_medio_high_km', '>'),
-                (self.h_extractor, 'gap_medio', 'gap_medio_high_h', '>'),
-                (self.km_extractor, 'cv_gaps', 'cv_gaps_high_km', '>'),
-                (self.h_extractor, 'cv_gaps', 'cv_gaps_high_h', '>'),
-            ]
+            # Determinar quais targets avaliar
+            has_km = True
+            has_h = True
+            if is_single_target:
+                # Verificar via proporcao_km: ≈1.0 → km-only, ≈0.0 → h-only
+                if prop_km and prop_km in features.index:
+                    has_km = features[prop_km] > 0.5
+                    has_h = not has_km
+
+            checks = []
+            if has_km:
+                checks.extend([
+                    (self.km_extractor, 'taxa_dias_ativos', 'taxa_dias_low_km', '<'),
+                    (self.km_extractor, 'gap_medio', 'gap_medio_high_km', '>'),
+                    (self.km_extractor, 'cv_gaps', 'cv_gaps_high_km', '>'),
+                ])
+            if has_h:
+                checks.extend([
+                    (self.h_extractor, 'taxa_dias_ativos', 'taxa_dias_low_h', '<'),
+                    (self.h_extractor, 'gap_medio', 'gap_medio_high_h', '>'),
+                    (self.h_extractor, 'cv_gaps', 'cv_gaps_high_h', '>'),
+                ])
             not_modelable = False
             for extractor, canonical, threshold_attr, op in checks:
                 feat_name = self._get_feature_name(extractor, canonical)
@@ -600,20 +686,34 @@ class DataQualityEvaluator:
                 quality = SeriesQuality.NOT_MODELABLE
                 reason = "Série não-modelável"
 
+        # Veículos single-target válidos recebem qualidade SINGLE_TARGET
+        if is_single_target and quality == SeriesQuality.VALID:
+            quality = SeriesQuality.SINGLE_TARGET
+            reason = "Single-target: apenas um target disponível"
+
         return {
             "quality": quality,
             "quality_reason": reason,
         }
 
-    def _evaluate_batch(self, df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
+    def _evaluate_batch(self, df: pd.DataFrame, single_target_ids: set = None, verbose: bool = True) -> pd.DataFrame:
         """Avalia qualidade de múltiplas amostras em lote."""
+        if single_target_ids is None:
+            single_target_ids = set()
+
         if verbose:
             print("=" * 80)
             print("AVALIANDO QUALIDADE DOS DADOS")
             print("=" * 80)
             print()
 
-        results = [self._evaluate_single(row) for _, row in df.iterrows()]
+        results = [
+            self._evaluate_single(
+                row,
+                is_single_target=(row["veiculo_id"] in single_target_ids),
+            )
+            for _, row in df.iterrows()
+        ]
         df_result = df[['veiculo_id']].copy()
         df_result['quality'] = [r['quality'] for r in results]
         df_result['quality_reason'] = [r['quality_reason'] for r in results]
@@ -622,10 +722,12 @@ class DataQualityEvaluator:
             total = len(df_result)
             n_outliers = (df_result['quality'] == SeriesQuality.OUTLIER).sum()
             n_not_modelable = (df_result['quality'] == SeriesQuality.NOT_MODELABLE).sum()
+            n_single_target = (df_result['quality'] == SeriesQuality.SINGLE_TARGET).sum()
             n_valid = (df_result['quality'] == SeriesQuality.VALID).sum()
             print(f"Total de amostras:        {total:>8,}")
             print(f"Outliers físicos:         {n_outliers:>8,} ({n_outliers/total*100:5.1f}%)")
             print(f"Séries não-modeláveis:    {n_not_modelable:>8,} ({n_not_modelable/total*100:5.1f}%)")
+            print(f"Single-target:            {n_single_target:>8,} ({n_single_target/total*100:5.1f}%)")
             print(f"Amostras válidas:         {n_valid:>8,} ({n_valid/total*100:5.1f}%)")
             print()
             print("=" * 80)
@@ -663,6 +765,7 @@ class DataQualityEvaluator:
             "outliers_fisicos": int((df["quality"] == SeriesQuality.OUTLIER).sum()),
             "series_nao_modelaveis": int((df["quality"] == SeriesQuality.NOT_MODELABLE).sum()),
             "series_vazias": int((df["quality"] == SeriesQuality.EMPTY).sum()),
+            "single_target": int((df["quality"] == SeriesQuality.SINGLE_TARGET).sum()),
             "veiculos_validos": int((df["quality"] == SeriesQuality.VALID).sum()),
             "filter_thresholds": self.filter_thresholds,
             "computed_thresholds": self.computed_thresholds,

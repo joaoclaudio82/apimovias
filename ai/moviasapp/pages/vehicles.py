@@ -10,7 +10,7 @@ st.title("🚗 Veículos")
 
 # ── Filters ───────────────────────────────────────────────────
 
-col_f1, col_f2 = st.columns(2)
+col_f1, col_f2, col_f3 = st.columns(3)
 
 quality_options = {v: k for k, v in QUALITY_LABELS.items()}
 quality_options_display = ["Todos"] + list(quality_options.keys())
@@ -18,9 +18,24 @@ quality_options_display = ["Todos"] + list(quality_options.keys())
 with col_f1:
     sel_q = st.selectbox("Qualidade", quality_options_display, index=0)
 with col_f2:
+    target_options = ["Todos", "KM + H", "KM only", "H only"]
+    sel_target = st.selectbox("Targets", target_options, index=0)
+with col_f3:
     search_id = st.text_input("Buscar ID do Veículo", "")
 
 hide_empty = st.checkbox("Ocultar veículos com série vazia", value=True)
+
+# Identificar single-target
+def _available_targets_label(row):
+    has_km = row.get("dt_inicio_km") is not None
+    has_h = row.get("dt_inicio_h") is not None
+    if has_km and has_h:
+        return "KM + H"
+    if has_km:
+        return "KM only"
+    if has_h:
+        return "H only"
+    return "—"
 
 q_val = quality_options.get(sel_q)
 
@@ -58,10 +73,20 @@ if df.empty:
 # ── Format table ──────────────────────────────────────────────
 
 df["quality_label"] = df["quality"].apply(quality_label)
+df["targets"] = df.apply(_available_targets_label, axis=1)
+
+# Apply target filter
+if sel_target != "Todos":
+    df = df[df["targets"] == sel_target]
+
+if df.empty:
+    st.info("Nenhum veículo encontrado.")
+    st.stop()
 
 display_cols = [
     "veiculo_id",
     "quality_label",
+    "targets",
     "dt_inicio_km",
     "dt_fim_km",
     "upper_km",
@@ -72,6 +97,7 @@ display_cols = [
 rename = {
     "veiculo_id": "ID do Veículo",
     "quality_label": "Qualidade",
+    "targets": "Targets",
     "dt_inicio_km": "Início KM",
     "dt_fim_km": "Fim KM",
     "upper_km": "Upper KM",

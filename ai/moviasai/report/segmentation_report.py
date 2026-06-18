@@ -389,6 +389,12 @@ class SegmentationReportGenerator:
         df_train = df_train[df_train["metrica_predominante"].isin(["KM", "H"])]
         df_all = df_all[df_all["metrica_predominante"].isin(["KM", "H"])]
 
+        # Excluir single-target (cluster_metrica == -1) que não passaram pelo classificador
+        if "cluster_metrica" in df_train.columns:
+            df_train = df_train[df_train["cluster_metrica"] >= 0]
+        if "cluster_metrica" in df_all.columns:
+            df_all = df_all[df_all["cluster_metrica"] >= 0]
+
         if len(df_all) == 0 or len(df_train) == 0:
             return
 

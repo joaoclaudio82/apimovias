@@ -19,7 +19,7 @@ from moviasai.profiling.feature_extraction import (
     get_extractor_by_prefix,
 )
 from moviasai.profiling.utils import compute_effective_period
-from moviasai.data.data_quality import DataQualityEvaluator
+from moviasai.data.data_quality import DataQualityEvaluator, SeriesQuality
 from moviasai.data.utils import expand_cluster_columns
 
 
@@ -206,10 +206,49 @@ class VehicleProfile:
             output_dir=output_dir,
         )
 
+        # Corrigir available_targets com base na janela amostrada:
+        # Veículos "km,h" sem actividade de um target no sampling window
+        # devem ser reclassificados como single-target.
+        if "available_targets" in df_annotated.columns:
+            df_sampled_max = (
+                self.df_sampled
+                .group_by("veiculo_id")
+                .agg([
+                    pl.col("km_dia_clean").max().alias("max_km_sampled"),
+                    pl.col("h_dia_clean").max().alias("max_h_sampled"),
+                ])
+                .to_pandas()
+                .set_index("veiculo_id")
+            )
+            dual_mask = df_annotated["available_targets"] == "km,h"
+            dual_ids = df_annotated.loc[dual_mask, "veiculo_id"]
+
+            for vid in dual_ids:
+                if vid not in df_sampled_max.index:
+                    continue
+                row = df_sampled_max.loc[vid]
+                has_km = row["max_km_sampled"] > 0
+                has_h = row["max_h_sampled"] > 0
+                if has_km and not has_h:
+                    df_annotated.loc[df_annotated["veiculo_id"] == vid, "available_targets"] = "km"
+                    if df_annotated.loc[df_annotated["veiculo_id"] == vid, "quality"].iloc[0] == SeriesQuality.VALID:
+                        df_annotated.loc[df_annotated["veiculo_id"] == vid, "quality"] = SeriesQuality.SINGLE_TARGET
+                        df_annotated.loc[df_annotated["veiculo_id"] == vid, "quality_reason"] = "Single-target (inactivo na janela amostrada)"
+                elif has_h and not has_km:
+                    df_annotated.loc[df_annotated["veiculo_id"] == vid, "available_targets"] = "h"
+                    if df_annotated.loc[df_annotated["veiculo_id"] == vid, "quality"].iloc[0] == SeriesQuality.VALID:
+                        df_annotated.loc[df_annotated["veiculo_id"] == vid, "quality"] = SeriesQuality.SINGLE_TARGET
+                        df_annotated.loc[df_annotated["veiculo_id"] == vid, "quality_reason"] = "Single-target (inactivo na janela amostrada)"
+
+            # Recalcular df_clean
+            df_clean = df_annotated[
+                df_annotated["quality"].isin([SeriesQuality.VALID, SeriesQuality.SINGLE_TARGET])
+            ].copy()
+
         self.df_features = df_annotated
         self.df_no_anomalies = df_clean
 
-        # Manter apenas veículos sem anomalias em df_sampled
+        # Manter apenas veículos VALID ou SINGLE_TARGET em df_sampled
         valid_ids = df_clean['veiculo_id'].unique().tolist()
         self.df_sampled = self.df_sampled.filter(pl.col('veiculo_id').is_in(valid_ids))
 
@@ -373,6 +412,23 @@ class VehicleProfile:
                     df_meta = df_meta.drop(columns=[col])
             setattr(self, attr, df_meta.merge(quality_df, on='veiculo_id', how='left'))
 
+        # Remover veículos da metadata do target inactivo (single-target reclassificados)
+        if 'available_targets' in self.df_features.columns:
+            h_only_ids = set(
+                self.df_features.loc[self.df_features['available_targets'] == 'h', 'veiculo_id']
+            )
+            km_only_ids = set(
+                self.df_features.loc[self.df_features['available_targets'] == 'km', 'veiculo_id']
+            )
+            if h_only_ids and self.df_metadata_km is not None:
+                self.df_metadata_km = self.df_metadata_km[
+                    ~self.df_metadata_km['veiculo_id'].isin(h_only_ids)
+                ].copy()
+            if km_only_ids and self.df_metadata_h is not None:
+                self.df_metadata_h = self.df_metadata_h[
+                    ~self.df_metadata_h['veiculo_id'].isin(km_only_ids)
+                ].copy()
+
     def run_pipeline(
         self,
         df: pl.DataFrame,
@@ -449,7 +505,8 @@ class VehicleProfile:
             self.df_features[col] = np.nan
 
         # Copiar valores dos veículos válidos (que já foram classificados)
-        valid_idx = self.df_features[self.df_features['quality'] == 0].index
+        valid_quality = [SeriesQuality.VALID, SeriesQuality.SINGLE_TARGET]
+        valid_idx = self.df_features[self.df_features['quality'].isin(valid_quality)].index
         for col in [c for c in self.df_features.columns if c.startswith(("type_", "cluster_"))]:
             if col in self.df_no_anomalies.columns:
                 # Alinhar por veiculo_id
@@ -459,7 +516,9 @@ class VehicleProfile:
                 )
 
         # Agora tentar classificar veículos inválidos
-        df_inv = self.df_features[self.df_features['quality'] != 0].copy()
+        df_inv = self.df_features[
+            ~self.df_features['quality'].isin(valid_quality)
+        ].copy()
         if df_inv.empty:
             return
 
@@ -514,7 +573,10 @@ class VehicleProfile:
             self.df_features.loc[df_inv.index[mask_ok], col] = df_cluster[col].values
 
     def _to_long_format(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Converte DataFrame wide em formato long (veiculo_id, feature, feature_class, valor)."""
+        """Converte DataFrame wide em formato long (veiculo_id, feature, feature_class, valor).
+
+        Para veículos single-target, exclui features do target indisponível.
+        """
         type_names = set(self.type_extractor.feature_names)
         km_names = {f for ext in self.km_extractors.values() for f in ext.feature_names}
         h_names = {f for ext in self.h_extractors.values() for f in ext.feature_names}
@@ -544,12 +606,27 @@ class VehicleProfile:
             return feat.rsplit('_', 1)[-1]
 
         df_long['feature_class'] = df_long['feature'].map(_classify)
+
+        # Excluir features do target indisponível para veículos single-target
+        if 'available_targets' in df.columns:
+            at_map = df.set_index('veiculo_id')['available_targets']
+            df_long = df_long.merge(
+                at_map.rename('_avail'), left_on='veiculo_id', right_index=True, how='left',
+            )
+            # Remover features km para veículos h-only e vice-versa
+            mask_drop = (
+                ((df_long['_avail'] == 'km') & (df_long['feature_class'] == 'h'))
+                | ((df_long['_avail'] == 'h') & (df_long['feature_class'] == 'km'))
+            )
+            df_long = df_long[~mask_drop].drop(columns=['_avail'])
+
         return df_long[['veiculo_id', 'feature', 'feature_class', 'valor']]
 
     def get_invalid_vehicles_long(self) -> pd.DataFrame:
         """Retorna veículos não-válidos em formato long.
 
-        Filtra ``df_features`` por ``quality != 0`` e exclui veículos
+        Filtra ``df_features`` por qualidade inválida (exclui VALID e
+        SINGLE_TARGET, que participam do pipeline) e exclui veículos
         com NaN ou Infinity em qualquer coluna numérica.
 
         Returns
@@ -562,7 +639,9 @@ class VehicleProfile:
         if self.df_features is None or 'quality' not in self.df_features.columns:
             return empty
 
-        df_invalid = self.df_features[self.df_features['quality'] != 0].copy()
+        df_invalid = self.df_features[
+            ~self.df_features['quality'].isin([SeriesQuality.VALID, SeriesQuality.SINGLE_TARGET])
+        ].copy()
 
         if df_invalid.empty:
             return empty

@@ -315,6 +315,39 @@ async def _upsert_vehicle_profile(
 # ------------------------------------------------------------------
 
 
+async def _remove_stale_metadata(
+    session: AsyncSession,
+    df_meta: pd.DataFrame,
+    model_cls: type,
+) -> int:
+    """
+    Remove registos de metadata para veículos que já não estão no DataFrame.
+    Isso garante que veículos reclassificados como single-target
+    não mantêm registos no target inactivo.
+    """
+    if df_meta is None or df_meta.empty:
+        # Se não há metadata nova, remover TODOS os registos existentes
+        result = await session.execute(delete(model_cls))
+        await session.flush()
+        return result.rowcount
+
+    current_vids = set(df_meta["veiculo_id"].astype(int).tolist())
+
+    # Buscar todos os veiculo_id existentes na tabela
+    result = await session.execute(select(model_cls.veiculo_id))
+    existing_vids = {r[0] for r in result.all()}
+
+    stale_vids = existing_vids - current_vids
+    if not stale_vids:
+        return 0
+
+    await session.execute(
+        delete(model_cls).where(model_cls.veiculo_id.in_(list(stale_vids)))
+    )
+    await session.flush()
+    return len(stale_vids)
+
+
 async def _upsert_metadata(
     session: AsyncSession,
     df_meta: pd.DataFrame,
@@ -640,27 +673,31 @@ async def _archive_removed_vehicles(
 ) -> int:
     """
     Após o pipeline de profiling, move dados de daily_activity para
-    daily_activity_removed para veículos com quality != 0 (VALID)
+    daily_activity_removed para veículos com quality inválida
     em AMBOS os targets.
 
-    Critério: veículo é removido se quality != 0 em h E quality != 0 em km.
-    (Se for VALID em pelo menos um target, mantém-se.)
+    Critério: veículo é removido se quality não é VALID (0) nem
+    SINGLE_TARGET (4) em h E em km.
+    (Se for VALID ou SINGLE_TARGET em pelo menos um target, mantém-se.)
 
     Só arquiva veículos que têm pelo menos alguma atividade (h > 0 ou km > 0).
 
     Retorna o número de registos arquivados.
     """
-    # Determinar veículos não-VALID em ambos os targets
+    # Qualidades que mantêm o veículo activo
+    _ACTIVE_QUALITIES = {0, 4}  # VALID, SINGLE_TARGET
+
+    # Determinar veículos não activos em ambos os targets
     invalid_h = set()
     invalid_km = set()
 
     if df_meta_h is not None and not df_meta_h.empty and "quality" in df_meta_h.columns:
         invalid_h = set(
-            df_meta_h.loc[df_meta_h["quality"] != 0, "veiculo_id"].astype(int).tolist()
+            df_meta_h.loc[~df_meta_h["quality"].isin(_ACTIVE_QUALITIES), "veiculo_id"].astype(int).tolist()
         )
     if df_meta_km is not None and not df_meta_km.empty and "quality" in df_meta_km.columns:
         invalid_km = set(
-            df_meta_km.loc[df_meta_km["quality"] != 0, "veiculo_id"].astype(int).tolist()
+            df_meta_km.loc[~df_meta_km["quality"].isin(_ACTIVE_QUALITIES), "veiculo_id"].astype(int).tolist()
         )
 
     # Removidos = inválidos em AMBOS os targets
@@ -797,6 +834,12 @@ async def _run_ingestion_steps(
     n_meta_h = await _upsert_metadata(session, df_meta_h, VehicleMetadataH)
     n_meta_km = await _upsert_metadata(session, df_meta_km, VehicleMetadataKm)
     logger.info("metadata: H=%d, KM=%d upserted", n_meta_h, n_meta_km)
+
+    # 6b. Remover registos de metadata para veículos reclassificados como single-target
+    n_removed_km = await _remove_stale_metadata(session, df_meta_km, VehicleMetadataKm)
+    n_removed_h = await _remove_stale_metadata(session, df_meta_h, VehicleMetadataH)
+    if n_removed_km or n_removed_h:
+        logger.info("metadata stale removed: KM=%d, H=%d", n_removed_km, n_removed_h)
 
     # 7. Arquivar veículos não-VALID em daily_activity_removed
     n_archived = await _archive_removed_vehicles(session, df_meta_h, df_meta_km)
@@ -1115,6 +1158,8 @@ async def ingest_and_predict(df_upload: pd.DataFrame, run_id: int) -> dict:
             n_meta_km = await _upsert_metadata(
                 session, df_meta_km, VehicleMetadataKm,
             )
+            await _remove_stale_metadata(session, df_meta_km, VehicleMetadataKm)
+            await _remove_stale_metadata(session, df_meta_h, VehicleMetadataH)
             n_archived = await _archive_removed_vehicles(
                 session, df_meta_h, df_meta_km,
             )

@@ -62,6 +62,97 @@ if meta:
 else:
     st.warning("Sem metadados para este veículo/target.")
 
+# ── Série histórica ───────────────────────────────────────────
+
+st.divider()
+st.subheader("Série Histórica")
+
+history = api.get_vehicle_history(veiculo_id, target)
+
+if history:
+    df_hist = pd.DataFrame(history)
+    df_hist["data"] = pd.to_datetime(df_hist["data"])
+    df_hist = df_hist.sort_values("data")
+
+    # Filtros de período
+    hist_min = df_hist["data"].min().date()
+    hist_max = df_hist["data"].max().date()
+    default_from = hist_min
+
+    col_h1, col_h2 = st.columns(2)
+    with col_h1:
+        hist_from = st.date_input(
+            "Período inicial",
+            value=default_from,
+            min_value=hist_min,
+            max_value=hist_max,
+            format="DD/MM/YYYY",
+            key="hist_from",
+        )
+    with col_h2:
+        hist_to = st.date_input(
+            "Período final",
+            value=hist_max,
+            min_value=hist_min,
+            max_value=hist_max,
+            format="DD/MM/YYYY",
+            key="hist_to",
+        )
+
+    df_hist = df_hist[
+        (df_hist["data"].dt.date >= hist_from)
+        & (df_hist["data"].dt.date <= hist_to)
+    ]
+
+    if df_hist.empty:
+        st.info("Sem dados no período selecionado.")
+    else:
+        fig_hist = go.Figure()
+
+        # Faixas alternadas por semana (seg-dom)
+        from datetime import datetime as _dt
+        week_start = pd.Timestamp(hist_from) - timedelta(days=pd.Timestamp(hist_from).weekday())
+        week_colors = ["rgba(200,200,200,0.10)", "rgba(100,100,200,0.08)"]
+        week_idx = 0
+        current = week_start
+        while current.date() <= hist_to:
+            w_end = current + timedelta(days=6, hours=23, minutes=59)
+            fig_hist.add_vrect(
+                x0=current, x1=w_end,
+                fillcolor=week_colors[week_idx % 2],
+                layer="below", line_width=0,
+            )
+            current += timedelta(days=7)
+            week_idx += 1
+
+        fig_hist.add_trace(go.Scatter(
+            x=df_hist["data"], y=df_hist["valor"],
+            mode="lines",
+            line=dict(color="#636EFA", width=1),
+            name=target.upper(),
+        ))
+
+        # Marcar upper se disponível
+        if meta and meta.get("upper"):
+            fig_hist.add_hline(
+                y=meta["upper"],
+                line_dash="dash",
+                line_color="#EF553B",
+                annotation_text=f"Upper ({meta['upper']:.1f})",
+                annotation_position="top right",
+            )
+
+        fig_hist.update_layout(
+            height=300,
+            margin=dict(t=30, b=30),
+            xaxis_title="Data",
+            yaxis_title=target.upper(),
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+        st.caption(f"{len(df_hist)} dias com {target.upper()} > 0")
+else:
+    st.info(f"Sem dados históricos de {target.upper()} para este veículo.")
+
 # ── Profile features ─────────────────────────────────────────
 
 st.divider()

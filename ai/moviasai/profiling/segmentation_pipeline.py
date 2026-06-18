@@ -36,6 +36,35 @@ from moviasai.versioning import PipelineManifest
 from moviasai.profiling.profile import VehicleProfile
 
 
+def _detect_single_target_metric(df: pd.DataFrame) -> pd.DataFrame:
+    """Atribui métrica predominante a veículos single-target.
+
+    Veículos com ``available_targets == 'km'`` recebem ``metrica_predominante = 'KM'``.
+    Veículos com ``available_targets == 'h'`` recebem ``metrica_predominante = 'H'``.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame com coluna ``available_targets``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Subconjunto single-target com coluna ``metrica_predominante`` preenchida.
+    """
+    if "available_targets" not in df.columns:
+        return pd.DataFrame()
+
+    mask = df["available_targets"].isin(["km", "h"])
+    if not mask.any():
+        return pd.DataFrame()
+
+    df_single = df[mask].copy()
+    df_single["metrica_predominante"] = df_single["available_targets"].str.upper()
+    df_single["cluster_metrica"] = -1  # Não participaram do clustering Stage 1
+    return df_single
+
+
 class VehicleSegmentationPipeline:
     """Pipeline completo de segmentação de veículos em duas etapas."""
 
@@ -216,29 +245,61 @@ class VehicleSegmentationPipeline:
     def run_stage1_clustering(
         self, k: Optional[int] = 2, k_range: Tuple[int, int] = (2, 10)
     ):
-        """Clustering para separar KM vs H."""
+        """Clustering para separar KM vs H.
+
+        Veículos single-target (``available_targets`` == 'km' ou 'h')
+        são excluídos do clustering e atribuídos directamente à sua métrica.
+        """
         print("\n" + "=" * 80)
         print("ETAPA 1: CLUSTERING DE MÉTRICA PREDOMINANTE")
         print("=" * 80 + "\n")
 
         df = self.df_no_anomalies.copy()
-        km_feature = "razao_km_h" if "razao_km_h" in df.columns else "proporcao_km"
 
-        print(f"Clustering para {len(df)} veículos...")
+        # Separar single-target antes do clustering
+        df_single = _detect_single_target_metric(df)
+        single_ids = set(df_single["veiculo_id"]) if not df_single.empty else set()
+        df_dual = df[~df["veiculo_id"].isin(single_ids)].copy()
+
+        if not df_single.empty:
+            print(f"Veículos single-target (bypass Stage 1): {len(df_single):,}")
+            for metric in ("KM", "H"):
+                n = (df_single["metrica_predominante"] == metric).sum()
+                if n:
+                    print(f"  • {metric}: {n:,}")
+            print()
+
+        if len(df_dual) == 0:
+            print("Nenhum veículo dual-target para clustering.")
+            df["cluster_metrica"] = -1
+            df["metrica_predominante"] = None
+            # Preencher single-target
+            if not df_single.empty:
+                for col in ("cluster_metrica", "metrica_predominante"):
+                    df.loc[df["veiculo_id"].isin(single_ids), col] = \
+                        df_single.set_index("veiculo_id")[col].reindex(
+                            df.loc[df["veiculo_id"].isin(single_ids), "veiculo_id"]
+                        ).values
+            self.df_no_anomalies = df
+            return df
+
+        km_feature = "razao_km_h" if "razao_km_h" in df_dual.columns else "proporcao_km"
+
+        print(f"Clustering para {len(df_dual)} veículos dual-target...")
 
         self.metric_clusterer = TypeClusterer(
             str(self.output_base_dir / "clustering" / "stage1")
         )
-        X_type = df[self.type_extractor.feature_names].values
+        X_type = df_dual[self.type_extractor.feature_names].values
         labels = self.metric_clusterer.fit(
             X_type, self.type_extractor.feature_names, k, k_range
         )
 
-        df["cluster_metrica"] = labels.astype(int)
+        df_dual["cluster_metrica"] = labels.astype(int)
         self.metric_clusterer.plot_projections()
 
         # Mapear clusters para nomes
-        cluster_stats = df.groupby("cluster_metrica")[[km_feature]].mean()
+        cluster_stats = df_dual.groupby("cluster_metrica")[[km_feature]].mean()
         if cluster_stats.loc[0, km_feature] > cluster_stats.loc[1, km_feature]:
             self.class_idx_to_metric = {0: "KM", 1: "H"}
             self.metric_to_class_idx = {"KM": 0, "H": 1}
@@ -246,7 +307,21 @@ class VehicleSegmentationPipeline:
             self.class_idx_to_metric = {1: "KM", 0: "H"}
             self.metric_to_class_idx = {"KM": 1, "H": 0}
 
-        df["metrica_predominante"] = df["cluster_metrica"].map(self.class_idx_to_metric)
+        df_dual["metrica_predominante"] = df_dual["cluster_metrica"].map(self.class_idx_to_metric)
+
+        # Reunir dual + single
+        df.loc[df["veiculo_id"].isin(df_dual["veiculo_id"]), ["cluster_metrica", "metrica_predominante"]] = \
+            df_dual[["cluster_metrica", "metrica_predominante"]].values
+
+        if not df_single.empty:
+            single_idx = df["veiculo_id"].isin(single_ids)
+            mapping = df_single.set_index("veiculo_id")
+            df.loc[single_idx, "cluster_metrica"] = (
+                df.loc[single_idx, "veiculo_id"].map(mapping["cluster_metrica"]).values
+            )
+            df.loc[single_idx, "metrica_predominante"] = (
+                df.loc[single_idx, "veiculo_id"].map(mapping["metrica_predominante"]).values
+            )
 
         clustering_dir = self.output_base_dir / "clustering" / "stage1"
         clustering_dir.mkdir(parents=True, exist_ok=True)
@@ -402,7 +477,11 @@ class VehicleSegmentationPipeline:
         return df_clean, df_removed
 
     def run_stage1_classification(self, df: pd.DataFrame, test_size: float = 0.3):
-        """Treina classificador de métrica predominante."""
+        """Treina classificador de métrica predominante.
+
+        Treina apenas com veículos dual-target. Após treinar, re-adiciona
+        os single-target a ``self.df_clean`` para que participem do Stage 2.
+        """
         if len(df) < 10:
             print("⚠️  Dados insuficientes para classificação Etapa 1")
             return
@@ -421,6 +500,16 @@ class VehicleSegmentationPipeline:
         self.df_clean = df.copy()
         self.df_clean["predicted_class"] = predictions
         self.df_clean["p_km"] = p_km
+
+        # Re-adicionar single-target vehicles (não passaram pelo classificador)
+        if "available_targets" in self.df_no_anomalies.columns:
+            single_mask = self.df_no_anomalies["available_targets"].isin(["km", "h"])
+            df_single = self.df_no_anomalies[single_mask].copy()
+            if not df_single.empty:
+                df_single["predicted_class"] = -1
+                df_single["p_km"] = np.nan
+                self.df_clean = pd.concat([self.df_clean, df_single])
+                print(f"\n⚡ {len(df_single)} veículos single-target adicionados ao Stage 2")
 
     @staticmethod
     def compute_uncertainty_thresholds_by_percentile(
@@ -562,6 +651,7 @@ class VehicleSegmentationPipeline:
         summary = {
             "total_veiculos": int(len(df)),
             "outliers": int((self.df_features["quality"] == SeriesQuality.OUTLIER).sum()),
+            "single_target": int((self.df_features["quality"] == SeriesQuality.SINGLE_TARGET).sum()),
             "veiculos_validos": int(len(df)),
             "metricas": {
                 str(k): int(v)
@@ -653,8 +743,10 @@ class VehicleSegmentationPipeline:
 
             # 4. Etapa 1: Classificação
             if self.train_classifiers:
+                # Usar apenas veículos dual-target para treinar o classificador de tipo
                 df = self.df_no_anomalies[
                     self.df_no_anomalies["metrica_predominante"].isin(["KM", "H"])
+                    & (self.df_no_anomalies.get("cluster_metrica", pd.Series(-1)) >= 0)
                 ].copy()
                 thresholds_clean = self.suggest_filter_thresholds(
                     df, percentile_clean=self.percentile_clean

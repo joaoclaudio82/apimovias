@@ -5,6 +5,7 @@ QUALITY_LABELS = {
     1: "⚠️ Outlier",
     2: "🚫 Não modelável",
     3: "❌ Vazia",
+    4: "⚡ Single-target",
 }
 
 QUALITY_COLORS = {
@@ -12,6 +13,7 @@ QUALITY_COLORS = {
     1: "orange",
     2: "red",
     3: "gray",
+    4: "blue",
 }
 
 

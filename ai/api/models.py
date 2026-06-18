@@ -81,7 +81,7 @@ class VehicleMetadataH:
     dt_inicio: Mapped[date] = mapped_column()
     dt_fim: Mapped[date] = mapped_column()
     upper: Mapped[Optional[float]] = mapped_column(Float, default=None)
-    quality: Mapped[Optional[int]] = mapped_column(default=None, comment="0=VALID,1=OUTLIER,2=NOT_MODELABLE,3=EMPTY")
+    quality: Mapped[Optional[int]] = mapped_column(default=None, comment="0=VALID,1=OUTLIER,2=NOT_MODELABLE,3=EMPTY,4=SINGLE_TARGET")
     quality_reason: Mapped[Optional[str]] = mapped_column(String(200), default=None)
 
 
@@ -95,7 +95,7 @@ class VehicleMetadataKm:
     dt_inicio: Mapped[date] = mapped_column()
     dt_fim: Mapped[date] = mapped_column()
     upper: Mapped[Optional[float]] = mapped_column(Float, default=None)
-    quality: Mapped[Optional[int]] = mapped_column(default=None, comment="0=VALID,1=OUTLIER,2=NOT_MODELABLE,3=EMPTY")
+    quality: Mapped[Optional[int]] = mapped_column(default=None, comment="0=VALID,1=OUTLIER,2=NOT_MODELABLE,3=EMPTY,4=SINGLE_TARGET")
     quality_reason: Mapped[Optional[str]] = mapped_column(String(200), default=None)
 
 

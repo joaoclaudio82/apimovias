@@ -9,10 +9,17 @@ from http import HTTPStatus
 
 import pandas as pd
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from sqlalchemy import select
+from sqlalchemy import select, union_all
 
 from api.database import session_context
-from api.models import ProfileMetadata, VehicleMetadataH, VehicleMetadataKm, VehicleProfileFeature
+from api.models import (
+    DailyActivity,
+    DailyActivityRemoved,
+    ProfileMetadata,
+    VehicleMetadataH,
+    VehicleMetadataKm,
+    VehicleProfileFeature,
+)
 from api.schemas import Message
 from api.schemas.profiling import ProfileMetadataResponse, VehicleInfoResponse, VehicleSummary
 from api.schemas.training_pipeline import _to_local_str
@@ -239,3 +246,51 @@ async def vehicle_info(
         profile=features or None,
         metadata=metadata,
     )
+
+
+# ------------------------------------------------------------------
+# GET — série histórica diária de um veículo
+# ------------------------------------------------------------------
+
+
+@router.get(
+    "/vehicle/{veiculo_id}/history",
+    status_code=HTTPStatus.OK,
+    summary="Série histórica diária de um veículo",
+)
+async def vehicle_history(
+    veiculo_id: int,
+    target: str = Query(pattern=r"^(km|h)$", description="Métrica: 'km' ou 'h'"),
+):
+    """Retorna a série temporal diária (DailyActivity + DailyActivityRemoved)."""
+    col = "km" if target == "km" else "h"
+
+    # União das duas tabelas
+    stmt = union_all(
+        select(
+            DailyActivity.data,
+            getattr(DailyActivity, col).label("valor"),
+        ).where(DailyActivity.veiculo_id == veiculo_id),
+        select(
+            DailyActivityRemoved.data,
+            getattr(DailyActivityRemoved, col).label("valor"),
+        ).where(DailyActivityRemoved.veiculo_id == veiculo_id),
+    ).order_by("data")
+
+    async with session_context() as session:
+        result = await session.execute(stmt)
+        rows = result.all()
+
+    # Filtrar dias com valor > 0
+    series = [
+        {"data": str(r.data), "valor": r.valor}
+        for r in rows if r.valor and r.valor > 0
+    ]
+
+    if not series:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=f"Sem dados de {target.upper()} para o veículo {veiculo_id}.",
+        )
+
+    return series
